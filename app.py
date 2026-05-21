@@ -20,6 +20,8 @@ st.set_page_config(page_title="SBC Astro Engine", page_icon="🕉️", layout="w
 swe.set_sid_mode(swe.SIDM_LAHIRI) # Strict Lahiri Ayanamsa
 
 # --- Dictionaries & Data ---
+RASHIS = ["Aries", "Taurus", "Gemini", "Cancer", "Leo", "Virgo", "Libra", "Scorpio", "Sagittarius", "Capricorn", "Aquarius", "Pisces"]
+
 SBC_NAKSHATRAS = [
     "Ashwini", "Bharani", "Krittika", "Rohini", "Mrigashira", "Ardra", 
     "Punarvasu", "Pushya", "Ashlesha", "Magha", "Purva Phalguni", 
@@ -73,6 +75,11 @@ def get_sbc_nakshatra(lon):
     elif lon >= 280.8889: return SBC_NAKSHATRAS[math.floor(lon / 13.333333) + 1], math.floor(lon / 13.333333) + 1
     else: return SBC_NAKSHATRAS[math.floor(lon / 13.333333)], math.floor(lon / 13.333333)
 
+def get_rashi_and_navamsha(lon):
+    rashi_idx = math.floor(lon / 30)
+    navamsha_idx = math.floor(lon / 3.33333333) % 12
+    return RASHIS[rashi_idx], RASHIS[navamsha_idx]
+
 def get_planet_data(jd, planet_id):
     flags = swe.FLG_SWIEPH | swe.FLG_SIDEREAL | swe.FLG_SPEED
     if planet_id == "KETU":
@@ -89,7 +96,7 @@ def get_vedha_type(speed, planet_name):
     elif 0 < speed < 0.2: return "Frontal (Stationary)"
     else: return "Left (Direct)"
 
-def calculate_snapshot(jd, native_n_idx):
+def calculate_snapshot(jd, native_n_idx, target_nak):
     data = []
     total_score = 50 
     planet_keys = list(PLANETS.keys()) + ["KETU"]
@@ -98,13 +105,15 @@ def calculate_snapshot(jd, native_n_idx):
         lon, speed = get_planet_data(jd, p_id)
         
         transiting_nak, transiting_idx = get_sbc_nakshatra(lon)
+        rashi, navamsha = get_rashi_and_navamsha(lon)
+        
         vedha_dir = get_vedha_type(speed, p_name)
         distance = (transiting_idx - native_n_idx + 28) % 28
         
         is_benefic = p_name in BENEFICS
         sign = 1 if is_benefic else -1
         
-        impact_text, score_impact, bg_color = "No Vedha", 0, "" # Default Empty CSS to fix Pandas Crash
+        impact_text, score_impact, bg_color = "No Vedha", 0, "" 
         
         if distance == 14: 
             impact_text, score_impact = "🔥 FRONTAL VEDHA", 15 * sign
@@ -113,18 +122,21 @@ def calculate_snapshot(jd, native_n_idx):
             impact_text, score_impact = "⚡ DIRECT CONJUNCTION", 20 * sign
             bg_color = "background-color: #A7F3D0; color: #065F46;" if is_benefic else "background-color: #FECACA; color: #991B1B;"
         elif distance in [1, 27]:
-            impact_text, score_impact = f"⚠️ ADJACENT ({vedha_dir})", 10 * sign
+            impact_text, score_impact = f"⚠️ ADJACENT", 10 * sign
             bg_color = "background-color: #ECFDF5; color: #047857;" if is_benefic else "background-color: #FFF7ED; color: #C2410C;"
         
         total_score += score_impact
         score_disp = f"+{score_impact}%" if score_impact > 0 else f"{score_impact}%" if score_impact < 0 else "-"
         
+        # User Friendly Formatting
+        action_text = f"Casting {vedha_dir} onto {target_nak}" if impact_text != "No Vedha" else "Safe Distance"
+        position_text = f"{transiting_nak} Nakshatra\n{rashi} Rashi | {navamsha} Navamsha"
+        
         data.append({
-            "Planet": f"{p_name} ({'Benefic' if is_benefic else 'Malefic'})",
-            "Nakshatra": transiting_nak,
-            "Motion": vedha_dir,
-            "Impact": impact_text,
-            "Score Effect": score_disp,
+            "Planet & Nature": f"{p_name}\n({('Benefic' if is_benefic else 'Malefic')})",
+            "Current Position": position_text,
+            "Action on You": action_text,
+            "Impact & Score": f"{impact_text} ({score_disp})",
             "_bg": bg_color,
             "raw_planet": p_name,
             "is_benefic": is_benefic,
@@ -134,8 +146,7 @@ def calculate_snapshot(jd, native_n_idx):
 
 # --- Share Market Logic ---
 def get_market_intel(data):
-    pos = []
-    neg = []
+    pos, neg = [], []
     for d in data:
         if not d['is_hit']: continue
         p = d['raw_planet']
@@ -161,7 +172,7 @@ def get_market_intel(data):
     return res
 
 # --- PDF Generator ---
-def clean(text): return text.encode('ascii', 'ignore').decode('ascii')
+def clean(text): return text.replace('\n', ' ').encode('ascii', 'ignore').decode('ascii')
 
 def generate_pdf(nak, pada, date_str, score, data, intel, is_long_term=False, chart_desc="", trend_data=None):
     pdf = FPDF()
@@ -192,24 +203,15 @@ def generate_pdf(nak, pada, date_str, score, data, intel, is_long_term=False, ch
     if not is_long_term:
         pdf.ln(5)
         pdf.set_font("Arial", 'B', 12)
-        pdf.cell(200, 8, txt=clean("Active Planetary Strikes (Vedhas):"), ln=True)
-        pdf.set_font("Arial", 'B', 10)
-        # Table Header
-        pdf.set_fill_color(240, 240, 240)
-        pdf.cell(40, 8, "Planet", border=1, fill=True)
-        pdf.cell(45, 8, "Nakshatra", border=1, fill=True)
-        pdf.cell(80, 8, "Impact", border=1, fill=True)
-        pdf.cell(25, 8, "Score", border=1, fill=True)
-        pdf.ln()
-        # Table Rows
-        pdf.set_font("Arial", size=10)
+        pdf.cell(200, 8, txt=clean("Detailed Planetary Strikes (Vedhas):"), ln=True)
+        pdf.set_font("Arial", size=9)
         for d in data:
             if d['is_hit']:
-                pdf.cell(40, 8, txt=clean(d['raw_planet']), border=1)
-                pdf.cell(45, 8, txt=clean(d['Nakshatra']), border=1)
-                pdf.cell(80, 8, txt=clean(d['Impact']), border=1)
-                pdf.cell(25, 8, txt=clean(d['Score Effect']), border=1)
-                pdf.ln()
+                pdf.set_fill_color(240, 240, 240)
+                pdf.cell(200, 6, txt=clean(f"[{d['Impact & Score']}] {d['Planet & Nature']} is {d['Action on You']}"), ln=True, fill=True)
+                pdf.cell(200, 6, txt=clean(f"     Location: {d['Current Position']}"), ln=True)
+                pdf.ln(2)
+
     else:
         pdf.ln(5)
         pdf.set_font("Arial", 'B', 12)
@@ -271,20 +273,22 @@ if view_mode == "Exact Time (Default)":
     dt_utc = local.localize(datetime.datetime.combine(target_date, target_time)).astimezone(pytz.utc)
     jd = swe.julday(dt_utc.year, dt_utc.month, dt_utc.day, dt_utc.hour + dt_utc.minute/60.0)
 
-    final_score, data = calculate_snapshot(jd, native_n_idx)
+    final_score, data = calculate_snapshot(jd, native_n_idx, target_nak)
     market_intel = get_market_intel(data)
     
     st.markdown("---")
     st.markdown(f"<h1 style='text-align: center; color: {'#059669' if final_score >= 60 else '#D97706' if final_score >=40 else '#EF4444'};'>Energy Score: {final_score}%</h1>", unsafe_allow_html=True)
     
-    # Detailed Table Generation (Now crash-free!)
-    st.subheader("📑 Individual Planetary Impacts")
+    st.subheader("📑 Detailed Planetary Matrix")
     df = pd.DataFrame(data)
     display_df = df.drop(columns=['_bg', 'raw_planet', 'is_benefic', 'is_hit'])
     
-    # Safely apply styles
     styled_df = display_df.style.apply(lambda r: [df.loc[r.name, '_bg']] * len(r), axis=1)
-    st.dataframe(styled_df, use_container_width=True, hide_index=True)
+    # Allows line breaks in cells for beautiful readability
+    st.dataframe(styled_df, use_container_width=True, hide_index=True, column_config={
+        "Current Position": st.column_config.TextColumn(width="medium"),
+        "Action on You": st.column_config.TextColumn(width="medium")
+    })
 
     pdf_bytes = generate_pdf(target_nak, target_pada, str(target_date), final_score, data, market_intel)
     st.download_button(label="📥 Download Detailed PDF & Market Report", data=pdf_bytes, file_name=f"SBC_{target_nak}_{target_date}.pdf", mime="application/pdf", type="primary")
@@ -308,7 +312,7 @@ elif view_mode == "Long-Term Forecast":
             dt_utc = local.localize(datetime.datetime.combine(eval_date, datetime.time(12,0))).astimezone(pytz.utc)
             jd = swe.julday(dt_utc.year, dt_utc.month, dt_utc.day, dt_utc.hour + dt_utc.minute/60.0)
             
-            score, daily_data = calculate_snapshot(jd, native_n_idx)
+            score, daily_data = calculate_snapshot(jd, native_n_idx, target_nak)
             trend_data.append({"Date": eval_date, "Score": score, "daily_data": daily_data})
             
         df_trend = pd.DataFrame(trend_data)
@@ -320,13 +324,28 @@ elif view_mode == "Long-Term Forecast":
         
         st.info(f"**Trend Summary:** Your average score over this {duration} period is **{avg_score}%**. The most auspicious day is {best_day['Date'].strftime('%d %B %Y')} ({best_day['Score']}%). The most cautious day is {worst_day['Date'].strftime('%d %B %Y')} ({worst_day['Score']}%).")
         
-        # --- NEW: Daily Breakdown Table in UI ---
-        st.markdown("### 📅 Daily Energy Breakdown")
-        ui_table_data = [{"Date": td["Date"].strftime("%d %b %Y"), "Energy Score": f"{td['Score']}%"} for td in trend_data]
-        df_ui_table = pd.DataFrame(ui_table_data)
-        styled_ui_table = df_ui_table.style.map(style_long_term_table, subset=["Energy Score"])
-        st.dataframe(styled_ui_table, use_container_width=True, hide_index=True)
+        st.markdown("---")
+        st.subheader("🔍 Deep Dive: Inspect Any Day")
+        st.markdown("Select a specific day from your Long-Term forecast to instantly view the detailed planetary matrix (Rashi, Navamsha, and exact Vedha strikes) for that exact date.")
         
+        # Interactive Daily Detail Viewer
+        day_options = [td["Date"].strftime("%d %B %Y") for td in trend_data]
+        selected_day = st.selectbox("View Detailed Breakdown For:", day_options, index=0)
+        
+        for td in trend_data:
+            if td["Date"].strftime("%d %B %Y") == selected_day:
+                st.markdown(f"**Score for {selected_day}: {td['Score']}%**")
+                
+                df_daily = pd.DataFrame(td['daily_data'])
+                display_daily = df_daily.drop(columns=['_bg', 'raw_planet', 'is_benefic', 'is_hit'])
+                styled_daily = display_daily.style.apply(lambda r: [df_daily.loc[r.name, '_bg']] * len(r), axis=1)
+                
+                st.dataframe(styled_daily, use_container_width=True, hide_index=True, column_config={
+                    "Current Position": st.column_config.TextColumn(width="medium"),
+                    "Action on You": st.column_config.TextColumn(width="medium")
+                })
+                break
+
         highlight_intel = get_market_intel(best_day['daily_data'])
         pdf_desc = f"Average Score: {avg_score}%\nBest Day: {best_day['Date'].strftime('%d %B %Y')}\nWorst Day: {worst_day['Date'].strftime('%d %B %Y')}"
         
