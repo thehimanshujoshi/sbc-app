@@ -30,8 +30,10 @@ PLANETS = {
     "Rahu": swe.MEAN_NODE 
 }
 
+BENEFICS = ["Moon", "Mercury", "Jupiter", "Venus"]
+MALEFICS = ["Sun", "Mars", "Saturn", "Rahu", "KETU"]
+
 # --- Full 108 Akshara (Syllable) to Nakshatra/Pada Mapping ---
-# Format: "Syllable": ("Nakshatra", Pada)
 AKSHARA_MAP = {
     "Chu": ("Ashwini", 1), "Che": ("Ashwini", 2), "Cho": ("Ashwini", 3), "La": ("Ashwini", 4),
     "Li": ("Bharani", 1), "Lu": ("Bharani", 2), "Le": ("Bharani", 3), "Lo": ("Bharani", 4),
@@ -130,8 +132,12 @@ dt_utc = dt_aware.astimezone(pytz.utc)
 
 jd = swe.julday(dt_utc.year, dt_utc.month, dt_utc.day, dt_utc.hour + dt_utc.minute/60.0)
 
-with st.spinner("Calculating orbital mechanics..."):
+with st.spinner("Calculating orbital mechanics & Vedha impact..."):
     data = []
+    
+    # We start with a base score of 50% (Neutral)
+    total_score = 50 
+    
     planet_keys = list(PLANETS.keys()) + ["KETU"]
     for p_name in planet_keys:
         p_id = PLANETS[p_name] if p_name != "KETU" else "KETU"
@@ -141,27 +147,78 @@ with st.spinner("Calculating orbital mechanics..."):
         vedha_direction = get_vedha_type(speed, p_name)
         distance = (transiting_idx - native_n_idx + 28) % 28
         
-        is_vedha = "No"
+        is_benefic = p_name in BENEFICS
+        nature = "Benefic" if is_benefic else "Malefic"
+        sign = 1 if is_benefic else -1
+        
+        impact_text = "No Vedha"
+        score_impact = 0
         bg_color = ""
         
+        # Scoring Logic
         if distance == 14: 
-            is_vedha = "🔥 FRONTAL VEDHA"
-            bg_color = "background-color: #FEE2E2; color: #991B1B; font-weight: bold;"
+            impact_text = "🔥 FRONTAL VEDHA"
+            score_impact = 15 * sign
+            bg_color = "background-color: #D1FAE5; color: #065F46;" if is_benefic else "background-color: #FEE2E2; color: #991B1B;"
         elif distance == 0:
-            is_vedha = "⚡ DIRECT CONJUNCTION"
-            bg_color = "background-color: #FEF3C7; color: #92400E; font-weight: bold;"
+            impact_text = "⚡ DIRECT CONJUNCTION"
+            score_impact = 20 * sign
+            bg_color = "background-color: #A7F3D0; color: #065F46; font-weight:bold;" if is_benefic else "background-color: #FECACA; color: #991B1B; font-weight:bold;"
         elif distance in [1, 27]:
-            is_vedha = f"⚠️ ADJACENT ({vedha_direction})"
-            bg_color = "background-color: #F0F9FF; color: #0369A1;"
+            impact_text = f"⚠️ ADJACENT ({vedha_direction})"
+            score_impact = 10 * sign
+            bg_color = "background-color: #ECFDF5; color: #047857;" if is_benefic else "background-color: #FFF7ED; color: #C2410C;"
+        
+        total_score += score_impact
+        
+        score_display = f"+{score_impact}%" if score_impact > 0 else f"{score_impact}%" if score_impact < 0 else "-"
         
         data.append({
-            "Planet": p_name,
+            "Planet": f"{p_name} ({nature})",
             "Current Nakshatra (28)": transiting_nak,
             "Motion / Vedha Cast": vedha_direction,
-            "Impact on You": is_vedha,
+            "Impact on You": impact_text,
+            "Score Effect": score_display,
             "_bg": bg_color
         })
 
+    # Ensure final score stays between 0% and 100%
+    final_score = max(0, min(100, total_score))
+
+    # Determine Final Category
+    if final_score >= 85: 
+        final_cat = "🌟 EXCELLENT (Highly Auspicious)"
+        final_color = "#059669" # Green
+    elif final_score >= 65: 
+        final_cat = "✅ GOOD (Favorable)"
+        final_color = "#10B981"
+    elif final_score >= 40: 
+        final_cat = "⚖️ AVERAGE (Mixed/Neutral)"
+        final_color = "#D97706" # Orange
+    elif final_score >= 20: 
+        final_cat = "⚠️ BAD (Caution Advised)"
+        final_color = "#EF4444" # Red
+    else: 
+        final_cat = "🛑 WORST (Highly Inauspicious)"
+        final_color = "#991B1B" # Dark Red
+
+    # 1. Display the Final Conclusive Score at the TOP
+    st.markdown("---")
+    st.markdown(
+        f"""
+        <div style="background-color: #F8FAFC; border: 2px solid {final_color}; border-radius: 10px; padding: 20px; text-align: center; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
+            <h2 style="margin:0; color: #475569; font-size: 18px;">Conclusive Vedha Energy Score</h2>
+            <h1 style="margin:10px 0; font-size: 48px; color: {final_color};">{final_score}%</h1>
+            <h3 style="margin:0; color: {final_color};">{final_cat}</h3>
+            <p style="margin-top:10px; font-size:14px; color:#64748B;">*Starts at a base of 50%. Benefic strikes add %, Malefic strikes deduct %.</p>
+        </div>
+        """, 
+        unsafe_allow_html=True
+    )
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # 2. Display the Breakdown Table
+    st.subheader("📑 Individual Planetary Impacts")
     df = pd.DataFrame(data)
     display_df = df.drop(columns=['_bg'])
     
@@ -172,4 +229,4 @@ with st.spinner("Calculating orbital mechanics..."):
     
     st.dataframe(styled_df, use_container_width=True, hide_index=True)
 
-st.info("💡 **How to read this:** In Sarvatobhadra Chakra, malefic planets (Saturn, Mars, Rahu, Ketu, Sun) casting Vedha (Frontal, Left, or Right) onto your Nakshatra indicate obstacles. Benefics (Jupiter, Venus, Mercury, Moon) casting Vedha indicate support and success.")
+st.info("💡 **How Scoring Works:** A **Direct Conjunction** carries the highest weight (±20%), followed by a **Frontal Vedha** (±15%), and finally **Adjacent Vedhas** (±10%). Benefics add to your score, Malefics subtract.")
