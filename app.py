@@ -104,17 +104,17 @@ def calculate_snapshot(jd, native_n_idx):
         is_benefic = p_name in BENEFICS
         sign = 1 if is_benefic else -1
         
-        impact_text, score_impact, bg_color = "No Vedha", 0, ""
+        impact_text, score_impact, bg_color = "No Vedha", 0, "" # Default Empty CSS to fix Pandas Crash
         
         if distance == 14: 
             impact_text, score_impact = "🔥 FRONTAL VEDHA", 15 * sign
-            bg_color = "#D1FAE5" if is_benefic else "#FEE2E2"
+            bg_color = "background-color: #D1FAE5; color: #065F46;" if is_benefic else "background-color: #FEE2E2; color: #991B1B;"
         elif distance == 0:
             impact_text, score_impact = "⚡ DIRECT CONJUNCTION", 20 * sign
-            bg_color = "#A7F3D0" if is_benefic else "#FECACA"
+            bg_color = "background-color: #A7F3D0; color: #065F46;" if is_benefic else "background-color: #FECACA; color: #991B1B;"
         elif distance in [1, 27]:
             impact_text, score_impact = f"⚠️ ADJACENT ({vedha_dir})", 10 * sign
-            bg_color = "#ECFDF5" if is_benefic else "#FFF7ED"
+            bg_color = "background-color: #ECFDF5; color: #047857;" if is_benefic else "background-color: #FFF7ED; color: #C2410C;"
         
         total_score += score_impact
         score_disp = f"+{score_impact}%" if score_impact > 0 else f"{score_impact}%" if score_impact < 0 else "-"
@@ -163,7 +163,7 @@ def get_market_intel(data):
 # --- PDF Generator ---
 def clean(text): return text.encode('ascii', 'ignore').decode('ascii')
 
-def generate_pdf(nak, pada, date_str, score, data, intel, is_long_term=False, chart_desc=""):
+def generate_pdf(nak, pada, date_str, score, data, intel, is_long_term=False, chart_desc="", trend_data=None):
     pdf = FPDF()
     pdf.add_page()
     pdf.set_font("Arial", 'B', 16)
@@ -185,7 +185,7 @@ def generate_pdf(nak, pada, date_str, score, data, intel, is_long_term=False, ch
     
     pdf.ln(5)
     pdf.set_font("Arial", 'B', 12)
-    pdf.cell(200, 8, txt=clean("Share Market & Sector Analysis (Personalized):"), ln=True)
+    pdf.cell(200, 8, txt=clean("Share Market & Sector Analysis:"), ln=True)
     pdf.set_font("Arial", size=10)
     pdf.multi_cell(0, 7, txt=clean(intel))
     
@@ -193,12 +193,50 @@ def generate_pdf(nak, pada, date_str, score, data, intel, is_long_term=False, ch
         pdf.ln(5)
         pdf.set_font("Arial", 'B', 12)
         pdf.cell(200, 8, txt=clean("Active Planetary Strikes (Vedhas):"), ln=True)
+        pdf.set_font("Arial", 'B', 10)
+        # Table Header
+        pdf.set_fill_color(240, 240, 240)
+        pdf.cell(40, 8, "Planet", border=1, fill=True)
+        pdf.cell(45, 8, "Nakshatra", border=1, fill=True)
+        pdf.cell(80, 8, "Impact", border=1, fill=True)
+        pdf.cell(25, 8, "Score", border=1, fill=True)
+        pdf.ln()
+        # Table Rows
         pdf.set_font("Arial", size=10)
         for d in data:
             if d['is_hit']:
-                pdf.cell(200, 7, txt=clean(f"> {d['raw_planet']}: {d['Impact']} ({d['Score Effect']})"), ln=True)
+                pdf.cell(40, 8, txt=clean(d['raw_planet']), border=1)
+                pdf.cell(45, 8, txt=clean(d['Nakshatra']), border=1)
+                pdf.cell(80, 8, txt=clean(d['Impact']), border=1)
+                pdf.cell(25, 8, txt=clean(d['Score Effect']), border=1)
+                pdf.ln()
+    else:
+        pdf.ln(5)
+        pdf.set_font("Arial", 'B', 12)
+        pdf.cell(200, 8, txt=clean("Daily Energy Breakdown:"), ln=True)
+        pdf.set_font("Arial", 'B', 10)
+        pdf.set_fill_color(240, 240, 240)
+        pdf.cell(95, 8, "Date", border=1, fill=True)
+        pdf.cell(95, 8, "Energy Score", border=1, fill=True)
+        pdf.ln()
+        
+        pdf.set_font("Arial", size=10)
+        if trend_data:
+            for td in trend_data:
+                pdf.cell(95, 8, txt=clean(td['Date'].strftime("%d %B %Y")), border=1)
+                pdf.cell(95, 8, txt=clean(f"{td['Score']}%"), border=1)
+                pdf.ln()
 
     return pdf.output(dest='S').encode('latin-1')
+
+def style_long_term_table(val):
+    try:
+        score = int(val.replace('%', ''))
+        if score >= 65: return 'background-color: #D1FAE5; color: #065F46; font-weight: bold;'
+        elif score >= 40: return 'background-color: #FEF3C7; color: #92400E; font-weight: bold;'
+        else: return 'background-color: #FEE2E2; color: #991B1B; font-weight: bold;'
+    except:
+        return ''
 
 # --- UI Setup ---
 st.title("🕉️ Sarvatobhadra Chakra (SBC) Engine")
@@ -239,8 +277,12 @@ if view_mode == "Exact Time (Default)":
     st.markdown("---")
     st.markdown(f"<h1 style='text-align: center; color: {'#059669' if final_score >= 60 else '#D97706' if final_score >=40 else '#EF4444'};'>Energy Score: {final_score}%</h1>", unsafe_allow_html=True)
     
+    # Detailed Table Generation (Now crash-free!)
+    st.subheader("📑 Individual Planetary Impacts")
     df = pd.DataFrame(data)
     display_df = df.drop(columns=['_bg', 'raw_planet', 'is_benefic', 'is_hit'])
+    
+    # Safely apply styles
     styled_df = display_df.style.apply(lambda r: [df.loc[r.name, '_bg']] * len(r), axis=1)
     st.dataframe(styled_df, use_container_width=True, hide_index=True)
 
@@ -276,10 +318,18 @@ elif view_mode == "Long-Term Forecast":
         best_day = df_trend.loc[df_trend["Score"].idxmax()]
         worst_day = df_trend.loc[df_trend["Score"].idxmin()]
         
-        st.info(f"**Trend Summary:** Your average score over this {duration} period is **{avg_score}%**. The most auspicious day is {best_day['Date']} ({best_day['Score']}%). The most cautious day is {worst_day['Date']} ({worst_day['Score']}%).")
+        st.info(f"**Trend Summary:** Your average score over this {duration} period is **{avg_score}%**. The most auspicious day is {best_day['Date'].strftime('%d %B %Y')} ({best_day['Score']}%). The most cautious day is {worst_day['Date'].strftime('%d %B %Y')} ({worst_day['Score']}%).")
         
-        # Get market intel for the best day as a highlight
+        # --- NEW: Daily Breakdown Table in UI ---
+        st.markdown("### 📅 Daily Energy Breakdown")
+        ui_table_data = [{"Date": td["Date"].strftime("%d %b %Y"), "Energy Score": f"{td['Score']}%"} for td in trend_data]
+        df_ui_table = pd.DataFrame(ui_table_data)
+        styled_ui_table = df_ui_table.style.map(style_long_term_table, subset=["Energy Score"])
+        st.dataframe(styled_ui_table, use_container_width=True, hide_index=True)
+        
         highlight_intel = get_market_intel(best_day['daily_data'])
-        pdf_bytes = generate_pdf(target_nak, target_pada, f"{start_date} to {start_date + datetime.timedelta(days=total_days)}", avg_score, [], highlight_intel, is_long_term=True, chart_desc=f"Average Score: {avg_score}%\nBest Day: {best_day['Date']}\nWorst Day: {worst_day['Date']}")
+        pdf_desc = f"Average Score: {avg_score}%\nBest Day: {best_day['Date'].strftime('%d %B %Y')}\nWorst Day: {worst_day['Date'].strftime('%d %B %Y')}"
+        
+        pdf_bytes = generate_pdf(target_nak, target_pada, f"{start_date} to {start_date + datetime.timedelta(days=total_days)}", avg_score, [], highlight_intel, is_long_term=True, chart_desc=pdf_desc, trend_data=trend_data)
         
         st.download_button(label="📥 Download Long-Term Trend & Market PDF", data=pdf_bytes, file_name=f"SBC_Forecast_{target_nak}.pdf", mime="application/pdf", type="primary")
