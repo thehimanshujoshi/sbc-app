@@ -4,16 +4,22 @@ import datetime
 import pytz
 import math
 
+# Load Libraries Safely
 try:
     import swisseph as swe
 except ImportError:
-    st.error("⚠️ The 'pyswisseph' library is missing. Please ensure you created the requirements.txt file on GitHub!")
+    st.error("⚠️ 'pyswisseph' is missing. Please update requirements.txt on GitHub!")
+    st.stop()
+try:
+    from fpdf import FPDF
+except ImportError:
+    st.error("⚠️ 'fpdf' is missing. Please update requirements.txt on GitHub!")
     st.stop()
 
 st.set_page_config(page_title="SBC Astro Engine", page_icon="🕉️", layout="wide")
-swe.set_sid_mode(swe.SIDM_LAHIRI)
+swe.set_sid_mode(swe.SIDM_LAHIRI) # Strict Lahiri Ayanamsa
 
-# --- 28 Nakshatra System (SBC includes Abhijit) ---
+# --- Dictionaries & Data ---
 SBC_NAKSHATRAS = [
     "Ashwini", "Bharani", "Krittika", "Rohini", "Mrigashira", "Ardra", 
     "Punarvasu", "Pushya", "Ashlesha", "Magha", "Purva Phalguni", 
@@ -26,14 +32,11 @@ SBC_NAKSHATRAS = [
 PLANETS = {
     "Sun": swe.SUN, "Moon": swe.MOON, "Mars": swe.MARS, 
     "Mercury": swe.MERCURY, "Jupiter": swe.JUPITER, 
-    "Venus": swe.VENUS, "Saturn": swe.SATURN, 
-    "Rahu": swe.MEAN_NODE 
+    "Venus": swe.VENUS, "Saturn": swe.SATURN, "Rahu": swe.MEAN_NODE 
 }
-
 BENEFICS = ["Moon", "Mercury", "Jupiter", "Venus"]
 MALEFICS = ["Sun", "Mars", "Saturn", "Rahu", "KETU"]
 
-# --- Full 108 Akshara (Syllable) to Nakshatra/Pada Mapping ---
 AKSHARA_MAP = {
     "Chu": ("Ashwini", 1), "Che": ("Ashwini", 2), "Cho": ("Ashwini", 3), "La": ("Ashwini", 4),
     "Li": ("Bharani", 1), "Lu": ("Bharani", 2), "Le": ("Bharani", 3), "Lo": ("Bharani", 4),
@@ -64,169 +67,219 @@ AKSHARA_MAP = {
     "De": ("Revati", 1), "Do": ("Revati", 2), "Cha": ("Revati", 3), "Chi": ("Revati", 4)
 }
 
+# --- Core Math ---
 def get_sbc_nakshatra(lon):
-    if 276.6667 <= lon < 280.8889:
-        return "Abhijit", 21
-    elif lon >= 280.8889:
-        regular_idx = math.floor(lon / 13.333333)
-        return SBC_NAKSHATRAS[regular_idx + 1], regular_idx + 1
-    else:
-        regular_idx = math.floor(lon / 13.333333)
-        return SBC_NAKSHATRAS[regular_idx], regular_idx
+    if 276.6667 <= lon < 280.8889: return "Abhijit", 21
+    elif lon >= 280.8889: return SBC_NAKSHATRAS[math.floor(lon / 13.333333) + 1], math.floor(lon / 13.333333) + 1
+    else: return SBC_NAKSHATRAS[math.floor(lon / 13.333333)], math.floor(lon / 13.333333)
 
 def get_planet_data(jd, planet_id):
     flags = swe.FLG_SWIEPH | swe.FLG_SIDEREAL | swe.FLG_SPEED
     if planet_id == "KETU":
-        pos, ret = swe.calc_ut(jd, swe.MEAN_NODE, flags)
-        lon = (pos[0] + 180.0) % 360.0
-        speed = pos[3] 
+        pos, _ = swe.calc_ut(jd, swe.MEAN_NODE, flags)
+        return (pos[0] + 180.0) % 360.0, pos[3] 
     else:
-        pos, ret = swe.calc_ut(jd, planet_id, flags)
-        lon = pos[0]
-        speed = pos[3]
-    return lon, speed
+        pos, _ = swe.calc_ut(jd, planet_id, flags)
+        return pos[0], pos[3]
 
 def get_vedha_type(speed, planet_name):
     if planet_name in ["Rahu", "KETU"]: return "Right (Retrograde)" 
     elif planet_name in ["Sun", "Moon"]: return "Left (Direct)" 
-    else:
-        if speed < 0: return "Right (Retrograde)"
-        elif speed > 0 and speed < 0.2: return "Frontal (Stationary)"
-        else: return "Left (Direct)"
+    elif speed < 0: return "Right (Retrograde)"
+    elif 0 < speed < 0.2: return "Frontal (Stationary)"
+    else: return "Left (Direct)"
 
-st.title("🕉️ Sarvatobhadra Chakra (SBC) Engine")
-st.markdown("Strict Lahiri Ayanamsa • 9-Planet Vedha • 28 Nakshatra System")
-
-# --- SIDEBAR: Profile Setup ---
-st.sidebar.header("👤 Subject Profile")
-profile_type = st.sidebar.radio("Target by:", ["First Name Syllable", "Birth Nakshatra"])
-
-native_n_idx = 0
-target_nak = ""
-target_pada = 1
-
-if profile_type == "First Name Syllable":
-    syllable = st.sidebar.selectbox("First Sound of Name", list(AKSHARA_MAP.keys()))
-    target_nak, target_pada = AKSHARA_MAP[syllable]
-    native_n_idx = SBC_NAKSHATRAS.index(target_nak)
-    st.sidebar.success(f"**Mapped to:** {target_nak} (Pada {target_pada})")
-else:
-    target_nak = st.sidebar.selectbox("Select Nakshatra", SBC_NAKSHATRAS, index=4)
-    target_pada = st.sidebar.selectbox("Select Pada", [1, 2, 3, 4], index=0)
-    native_n_idx = SBC_NAKSHATRAS.index(target_nak)
-
-st.sidebar.markdown("---")
-st.sidebar.header("🗓️ Time Settings")
-target_date = st.sidebar.date_input("Target Date", datetime.date.today())
-target_time = st.sidebar.time_input("Exact Time", datetime.time(12, 0))
-tz_str = st.sidebar.selectbox("Timezone", ["Asia/Kolkata", "UTC", "America/New_York"], index=0)
-
-# --- MAIN APP LOGIC ---
-st.markdown(f"### 🔭 Transiting Planetary Vedhas on **{target_nak} (Pada {target_pada})**")
-st.markdown("Displays which planets are actively striking or aspecting your target Nakshatra right now.")
-
-local = pytz.timezone(tz_str)
-dt_unaware = datetime.datetime.combine(target_date, target_time)
-dt_aware = local.localize(dt_unaware)
-dt_utc = dt_aware.astimezone(pytz.utc)
-
-jd = swe.julday(dt_utc.year, dt_utc.month, dt_utc.day, dt_utc.hour + dt_utc.minute/60.0)
-
-with st.spinner("Calculating orbital mechanics & Vedha impact..."):
+def calculate_snapshot(jd, native_n_idx):
     data = []
-    
-    # We start with a base score of 50% (Neutral)
     total_score = 50 
-    
     planet_keys = list(PLANETS.keys()) + ["KETU"]
     for p_name in planet_keys:
         p_id = PLANETS[p_name] if p_name != "KETU" else "KETU"
         lon, speed = get_planet_data(jd, p_id)
         
         transiting_nak, transiting_idx = get_sbc_nakshatra(lon)
-        vedha_direction = get_vedha_type(speed, p_name)
+        vedha_dir = get_vedha_type(speed, p_name)
         distance = (transiting_idx - native_n_idx + 28) % 28
         
         is_benefic = p_name in BENEFICS
-        nature = "Benefic" if is_benefic else "Malefic"
         sign = 1 if is_benefic else -1
         
-        impact_text = "No Vedha"
-        score_impact = 0
-        bg_color = ""
+        impact_text, score_impact, bg_color = "No Vedha", 0, ""
         
-        # Scoring Logic
         if distance == 14: 
-            impact_text = "🔥 FRONTAL VEDHA"
-            score_impact = 15 * sign
-            bg_color = "background-color: #D1FAE5; color: #065F46;" if is_benefic else "background-color: #FEE2E2; color: #991B1B;"
+            impact_text, score_impact = "🔥 FRONTAL VEDHA", 15 * sign
+            bg_color = "#D1FAE5" if is_benefic else "#FEE2E2"
         elif distance == 0:
-            impact_text = "⚡ DIRECT CONJUNCTION"
-            score_impact = 20 * sign
-            bg_color = "background-color: #A7F3D0; color: #065F46; font-weight:bold;" if is_benefic else "background-color: #FECACA; color: #991B1B; font-weight:bold;"
+            impact_text, score_impact = "⚡ DIRECT CONJUNCTION", 20 * sign
+            bg_color = "#A7F3D0" if is_benefic else "#FECACA"
         elif distance in [1, 27]:
-            impact_text = f"⚠️ ADJACENT ({vedha_direction})"
-            score_impact = 10 * sign
-            bg_color = "background-color: #ECFDF5; color: #047857;" if is_benefic else "background-color: #FFF7ED; color: #C2410C;"
+            impact_text, score_impact = f"⚠️ ADJACENT ({vedha_dir})", 10 * sign
+            bg_color = "#ECFDF5" if is_benefic else "#FFF7ED"
         
         total_score += score_impact
-        
-        score_display = f"+{score_impact}%" if score_impact > 0 else f"{score_impact}%" if score_impact < 0 else "-"
+        score_disp = f"+{score_impact}%" if score_impact > 0 else f"{score_impact}%" if score_impact < 0 else "-"
         
         data.append({
-            "Planet": f"{p_name} ({nature})",
-            "Current Nakshatra (28)": transiting_nak,
-            "Motion / Vedha Cast": vedha_direction,
-            "Impact on You": impact_text,
-            "Score Effect": score_display,
-            "_bg": bg_color
+            "Planet": f"{p_name} ({'Benefic' if is_benefic else 'Malefic'})",
+            "Nakshatra": transiting_nak,
+            "Motion": vedha_dir,
+            "Impact": impact_text,
+            "Score Effect": score_disp,
+            "_bg": bg_color,
+            "raw_planet": p_name,
+            "is_benefic": is_benefic,
+            "is_hit": impact_text != "No Vedha"
         })
+    return max(0, min(100, total_score)), data
 
-    # Ensure final score stays between 0% and 100%
-    final_score = max(0, min(100, total_score))
+# --- Share Market Logic ---
+def get_market_intel(data):
+    pos = []
+    neg = []
+    for d in data:
+        if not d['is_hit']: continue
+        p = d['raw_planet']
+        
+        if p == "Sun": sec = "PSU Stocks, Govt Bonds, Pharma, Gold"
+        elif p == "Moon": sec = "FMCG, Shipping, Liquids, Silver"
+        elif p == "Mars": sec = "Real Estate, Defense, Copper, Heavy Metals"
+        elif p == "Mercury": sec = "IT, Telecom, Banking, Green Tech"
+        elif p == "Jupiter": sec = "Finance, Banks, Education, Yellow Metals"
+        elif p == "Venus": sec = "Auto, Luxury, Entertainment, Textiles"
+        elif p == "Saturn": sec = "Oil & Gas, Coal, Steel, Heavy Machinery"
+        elif p == "Rahu": sec = "AI, Crypto, Tech, Foreign Equities"
+        elif p == "KETU": sec = "Biotech, Niche Pharma, Micro-Tech"
+        else: sec = "General Market"
 
-    # Determine Final Category
-    if final_score >= 85: 
-        final_cat = "🌟 EXCELLENT (Highly Auspicious)"
-        final_color = "#059669" # Green
-    elif final_score >= 65: 
-        final_cat = "✅ GOOD (Favorable)"
-        final_color = "#10B981"
-    elif final_score >= 40: 
-        final_cat = "⚖️ AVERAGE (Mixed/Neutral)"
-        final_color = "#D97706" # Orange
-    elif final_score >= 20: 
-        final_cat = "⚠️ BAD (Caution Advised)"
-        final_color = "#EF4444" # Red
-    else: 
-        final_cat = "🛑 WORST (Highly Inauspicious)"
-        final_color = "#991B1B" # Dark Red
+        if d['is_benefic']: pos.append(f"- {p}: FAVORABLE for {sec}")
+        else: neg.append(f"- {p}: HIGHLY VOLATILE / AVOID {sec}")
+        
+    res = "--- SECTORS FAVORABLE FOR YOU TODAY ---\n"
+    res += "\n".join(pos) if pos else "No major benefic alignments protecting specific sectors for you today."
+    res += "\n\n--- SECTORS TO AVOID / VOLATILE FOR YOU ---\n"
+    res += "\n".join(neg) if neg else "No major malefic threats to specific sectors for you today."
+    return res
 
-    # 1. Display the Final Conclusive Score at the TOP
+# --- PDF Generator ---
+def clean(text): return text.encode('ascii', 'ignore').decode('ascii')
+
+def generate_pdf(nak, pada, date_str, score, data, intel, is_long_term=False, chart_desc=""):
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_font("Arial", 'B', 16)
+    title = "SBC Long-Term Forecast" if is_long_term else "SBC Daily Analysis"
+    pdf.cell(200, 10, txt=clean(title), ln=True, align='C')
+    
+    pdf.set_font("Arial", size=12)
+    pdf.ln(5)
+    pdf.cell(200, 8, txt=clean(f"Native Profile: {nak} (Pada {pada})"), ln=True)
+    pdf.cell(200, 8, txt=clean(f"Date/Range: {date_str}"), ln=True)
+    pdf.cell(200, 8, txt=clean(f"Conclusive Energy Score: {score}%"), ln=True)
+    
+    if is_long_term:
+        pdf.ln(5)
+        pdf.set_font("Arial", 'B', 12)
+        pdf.cell(200, 8, txt=clean("Trend Summary:"), ln=True)
+        pdf.set_font("Arial", size=11)
+        pdf.multi_cell(0, 8, txt=clean(chart_desc))
+    
+    pdf.ln(5)
+    pdf.set_font("Arial", 'B', 12)
+    pdf.cell(200, 8, txt=clean("Share Market & Sector Analysis (Personalized):"), ln=True)
+    pdf.set_font("Arial", size=10)
+    pdf.multi_cell(0, 7, txt=clean(intel))
+    
+    if not is_long_term:
+        pdf.ln(5)
+        pdf.set_font("Arial", 'B', 12)
+        pdf.cell(200, 8, txt=clean("Active Planetary Strikes (Vedhas):"), ln=True)
+        pdf.set_font("Arial", size=10)
+        for d in data:
+            if d['is_hit']:
+                pdf.cell(200, 7, txt=clean(f"> {d['raw_planet']}: {d['Impact']} ({d['Score Effect']})"), ln=True)
+
+    return pdf.output(dest='S').encode('latin-1')
+
+# --- UI Setup ---
+st.title("🕉️ Sarvatobhadra Chakra (SBC) Engine")
+st.markdown("Strict Lahiri Ayanamsa • Stock Market Forecasting • 9-Planet Vedha")
+
+# --- SIDEBAR ---
+st.sidebar.header("👤 1. Subject Profile")
+profile_type = st.sidebar.radio("Target by:", ["First Name Syllable", "Birth Nakshatra"])
+
+if profile_type == "First Name Syllable":
+    syllable = st.sidebar.selectbox("First Sound of Name", list(AKSHARA_MAP.keys()))
+    target_nak, target_pada = AKSHARA_MAP[syllable]
+    native_n_idx = SBC_NAKSHATRAS.index(target_nak)
+    st.sidebar.success(f"**Mapped:** {target_nak} (Pada {target_pada})")
+else:
+    target_nak = st.sidebar.selectbox("Select Nakshatra", SBC_NAKSHATRAS, index=4)
+    target_pada = st.sidebar.selectbox("Select Pada", [1, 2, 3, 4], index=0)
+    native_n_idx = SBC_NAKSHATRAS.index(target_nak)
+
+st.sidebar.markdown("---")
+st.sidebar.header("👁️ 2. View Mode")
+view_mode = st.sidebar.radio("Select Layout:", ["Exact Time (Default)", "Long-Term Forecast"])
+
+# --- EXACT TIME MODE ---
+if view_mode == "Exact Time (Default)":
+    col1, col2 = st.columns(2)
+    with col1: target_date = st.date_input("Target Date", datetime.date.today())
+    with col2: target_time = st.time_input("Exact Time", datetime.time(12, 0))
+    tz_str = st.selectbox("Timezone", ["Asia/Kolkata", "UTC", "America/New_York"], index=0)
+
+    local = pytz.timezone(tz_str)
+    dt_utc = local.localize(datetime.datetime.combine(target_date, target_time)).astimezone(pytz.utc)
+    jd = swe.julday(dt_utc.year, dt_utc.month, dt_utc.day, dt_utc.hour + dt_utc.minute/60.0)
+
+    final_score, data = calculate_snapshot(jd, native_n_idx)
+    market_intel = get_market_intel(data)
+    
     st.markdown("---")
-    st.markdown(
-        f"""
-        <div style="background-color: #F8FAFC; border: 2px solid {final_color}; border-radius: 10px; padding: 20px; text-align: center; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
-            <h2 style="margin:0; color: #475569; font-size: 18px;">Conclusive Vedha Energy Score</h2>
-            <h1 style="margin:10px 0; font-size: 48px; color: {final_color};">{final_score}%</h1>
-            <h3 style="margin:0; color: {final_color};">{final_cat}</h3>
-            <p style="margin-top:10px; font-size:14px; color:#64748B;">*Starts at a base of 50%. Benefic strikes add %, Malefic strikes deduct %.</p>
-        </div>
-        """, 
-        unsafe_allow_html=True
-    )
-    st.markdown("<br>", unsafe_allow_html=True)
-
-    # 2. Display the Breakdown Table
-    st.subheader("📑 Individual Planetary Impacts")
+    st.markdown(f"<h1 style='text-align: center; color: {'#059669' if final_score >= 60 else '#D97706' if final_score >=40 else '#EF4444'};'>Energy Score: {final_score}%</h1>", unsafe_allow_html=True)
+    
     df = pd.DataFrame(data)
-    display_df = df.drop(columns=['_bg'])
-    
-    styled_df = display_df.style.apply(
-        lambda row: [df.loc[row.name, '_bg']] * len(row), 
-        axis=1
-    ).set_properties(**{'text-align': 'center', 'border': '1px solid #E2E8F0', 'padding': '10px'})
-    
+    display_df = df.drop(columns=['_bg', 'raw_planet', 'is_benefic', 'is_hit'])
+    styled_df = display_df.style.apply(lambda r: [df.loc[r.name, '_bg']] * len(r), axis=1)
     st.dataframe(styled_df, use_container_width=True, hide_index=True)
 
-st.info("💡 **How Scoring Works:** A **Direct Conjunction** carries the highest weight (±20%), followed by a **Frontal Vedha** (±15%), and finally **Adjacent Vedhas** (±10%). Benefics add to your score, Malefics subtract.")
+    pdf_bytes = generate_pdf(target_nak, target_pada, str(target_date), final_score, data, market_intel)
+    st.download_button(label="📥 Download Detailed PDF & Market Report", data=pdf_bytes, file_name=f"SBC_{target_nak}_{target_date}.pdf", mime="application/pdf", type="primary")
+
+# --- LONG TERM MODE ---
+elif view_mode == "Long-Term Forecast":
+    st.markdown("### 📈 Long-Term Energy & Market Trend")
+    col1, col2 = st.columns(2)
+    with col1: start_date = st.date_input("Start Date", datetime.date.today())
+    with col2: duration = st.selectbox("Duration", ["1 Week", "2 Weeks", "1 Month", "2 Months", "3 Months", "6 Months", "1 Year"], index=2)
+    
+    days_map = {"1 Week": 7, "2 Weeks": 14, "1 Month": 30, "2 Months": 60, "3 Months": 90, "6 Months": 180, "1 Year": 365}
+    total_days = days_map[duration]
+    
+    with st.spinner(f"Simulating {total_days} days of planetary orbits..."):
+        trend_data = []
+        local = pytz.timezone("Asia/Kolkata")
+        
+        for i in range(total_days):
+            eval_date = start_date + datetime.timedelta(days=i)
+            dt_utc = local.localize(datetime.datetime.combine(eval_date, datetime.time(12,0))).astimezone(pytz.utc)
+            jd = swe.julday(dt_utc.year, dt_utc.month, dt_utc.day, dt_utc.hour + dt_utc.minute/60.0)
+            
+            score, daily_data = calculate_snapshot(jd, native_n_idx)
+            trend_data.append({"Date": eval_date, "Score": score, "daily_data": daily_data})
+            
+        df_trend = pd.DataFrame(trend_data)
+        st.line_chart(df_trend.set_index("Date")["Score"], color="#4338CA")
+        
+        avg_score = int(df_trend["Score"].mean())
+        best_day = df_trend.loc[df_trend["Score"].idxmax()]
+        worst_day = df_trend.loc[df_trend["Score"].idxmin()]
+        
+        st.info(f"**Trend Summary:** Your average score over this {duration} period is **{avg_score}%**. The most auspicious day is {best_day['Date']} ({best_day['Score']}%). The most cautious day is {worst_day['Date']} ({worst_day['Score']}%).")
+        
+        # Get market intel for the best day as a highlight
+        highlight_intel = get_market_intel(best_day['daily_data'])
+        pdf_bytes = generate_pdf(target_nak, target_pada, f"{start_date} to {start_date + datetime.timedelta(days=total_days)}", avg_score, [], highlight_intel, is_long_term=True, chart_desc=f"Average Score: {avg_score}%\nBest Day: {best_day['Date']}\nWorst Day: {worst_day['Date']}")
+        
+        st.download_button(label="📥 Download Long-Term Trend & Market PDF", data=pdf_bytes, file_name=f"SBC_Forecast_{target_nak}.pdf", mime="application/pdf", type="primary")
