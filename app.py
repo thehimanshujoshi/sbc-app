@@ -50,11 +50,9 @@ AKSHARA_MAP = {
 # --- Astrological Math ---
 def get_sbc_nakshatra(lon):
     """Calculates the 28-Nakshatra system including Abhijit for SBC mapping."""
-    # Traditional Abhijit span is roughly 276°40' to 280°53'20"
     if 276.6667 <= lon < 280.8889:
         return "Abhijit", 21
     elif lon >= 280.8889:
-        # Shift subsequent Nakshatras
         regular_idx = math.floor(lon / 13.333333)
         return SBC_NAKSHATRAS[regular_idx + 1], regular_idx + 1
     else:
@@ -67,7 +65,7 @@ def get_planet_data(jd, planet_id):
     if planet_id == "KETU":
         pos, ret = swe.calc_ut(jd, swe.MEAN_NODE, flags)
         lon = (pos[0] + 180.0) % 360.0
-        speed = pos[3] # Ketu moves same speed as Rahu (always retrograde in mean motion)
+        speed = pos[3] 
     else:
         pos, ret = swe.calc_ut(jd, planet_id, flags)
         lon = pos[0]
@@ -76,13 +74,13 @@ def get_planet_data(jd, planet_id):
 
 def get_vedha_type(speed, planet_name):
     if planet_name in ["Rahu", "KETU"]:
-        return "Right (Retrograde)" # Nodes always retrograde
+        return "Right (Retrograde)" 
     elif planet_name in ["Sun", "Moon"]:
-        return "Left (Direct)" # Luminaries never retrograde
+        return "Left (Direct)" 
     else:
         if speed < 0:
             return "Right (Retrograde)"
-        elif speed > 0 and speed < 0.2: # Slowing down / stationary
+        elif speed > 0 and speed < 0.2: 
             return "Frontal (Stationary)"
         else:
             return "Left (Direct)"
@@ -130,7 +128,6 @@ jd = swe.julday(dt_utc.year, dt_utc.month, dt_utc.day, dt_utc.hour + dt_utc.minu
 with st.spinner("Calculating orbital mechanics..."):
     data = []
     
-    # Calculate all 9 planets
     planet_keys = list(PLANETS.keys()) + ["KETU"]
     for p_name in planet_keys:
         p_id = PLANETS[p_name] if p_name != "KETU" else "KETU"
@@ -139,25 +136,17 @@ with st.spinner("Calculating orbital mechanics..."):
         transiting_nak, transiting_idx = get_sbc_nakshatra(lon)
         vedha_direction = get_vedha_type(speed, p_name)
         
-        # simplified 28-nakshatra vedha distance logic (Frontal is opposite, Left/Right are diagonals)
-        # SBC grid math is complex, we display the relative distance for analysis
         distance = (transiting_idx - native_n_idx + 28) % 28
         
         is_vedha = "No"
         bg_color = ""
         
-        # Frontal Vedha (Crosses the center of the SBC grid)
         if distance == 14: 
             is_vedha = "🔥 FRONTAL VEDHA"
             bg_color = "background-color: #FEE2E2; color: #991B1B; font-weight: bold;"
-            
-        # If planet is in the exact same Nakshatra
         elif distance == 0:
             is_vedha = "⚡ DIRECT CONJUNCTION"
             bg_color = "background-color: #FEF3C7; color: #92400E; font-weight: bold;"
-            
-        # Left/Right Vedhas occur on specific grid lines (corners). 
-        # For simplicity in list view, we highlight immediate threatening proximity
         elif distance in [1, 27]:
             is_vedha = f"⚠️ ADJACENT ({vedha_direction})"
             bg_color = "background-color: #F0F9FF; color: #0369A1;"
@@ -172,12 +161,13 @@ with st.spinner("Calculating orbital mechanics..."):
 
     df = pd.DataFrame(data)
 
-    # Styling function
-    def apply_sbc_styles(row):
-        return [row['_bg']] * len(row)
-
+    # Cleaned up Styling function to prevent column mismatch
     display_df = df.drop(columns=['_bg'])
-    styled_df = display_df.style.apply(lambda r: apply_sbc_styles(df.loc[r.name]), axis=1).set_properties(**{'text-align': 'center', 'border': '1px solid #E2E8F0', 'padding': '10px'})
+    
+    styled_df = display_df.style.apply(
+        lambda row: [df.loc[row.name, '_bg']] * len(row), 
+        axis=1
+    ).set_properties(**{'text-align': 'center', 'border': '1px solid #E2E8F0', 'padding': '10px'})
     
     st.dataframe(styled_df, use_container_width=True, hide_index=True)
 
