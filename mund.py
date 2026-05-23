@@ -1,6 +1,5 @@
 ### 📋 PART 1: Core Engine, Mathematical Ephemeris, and Data Infrastructure
 
-```python
 import streamlit as st
 import pandas as pd
 import datetime
