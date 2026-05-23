@@ -127,6 +127,16 @@ def get_sbc_nakshatra(lon):
     elif lon >= 280.8889: return SBC_NAKSHATRAS[math.floor(lon / 13.333333) + 1], math.floor(lon / 13.333333) + 1
     else: return SBC_NAKSHATRAS[math.floor(lon / 13.333333)], math.floor(lon / 13.333333)
 
+def get_nak_boundaries(lon):
+    if 276.6667 <= lon < 280.8889:
+        return 276.6667, 280.8889
+    elif lon >= 280.8889:
+        idx = math.floor(lon / 13.333333)
+        return max(280.8889, idx * 13.333333), (idx + 1) * 13.333333
+    else:
+        idx = math.floor(lon / 13.333333)
+        return idx * 13.333333, min(276.6667, (idx + 1) * 13.333333)
+
 def get_rashi_and_navamsha(lon):
     rashi_idx = math.floor(lon / 30)
     navamsha_idx = math.floor(lon / 3.33333333) % 12
@@ -183,6 +193,15 @@ def calculate_snapshot(jd, native_n_idx, target_nak):
         action_text = f"Casting {vedha_dir} onto {target_nak}" if impact_text != "No Vedha" else "Safe Distance"
         position_text = f"{transiting_nak} Nakshatra\n{rashi} Rashi | {navamsha} Navamsha"
         
+        start_lon, end_lon = get_nak_boundaries(lon)
+        span = end_lon - start_lon
+        prog = 50
+        if span > 0:
+            prog = ((lon - start_lon) / span) * 100
+            if speed < 0 or p_name in ["Rahu", "KETU"]:
+                prog = 100 - prog
+            prog = max(0, min(100, int(prog)))
+        
         data.append({
             "Planet & Nature": f"{p_name}\n({('Benefic' if is_benefic else 'Malefic')})",
             "Current Position": position_text,
@@ -191,7 +210,8 @@ def calculate_snapshot(jd, native_n_idx, target_nak):
             "_bg": bg_color,
             "raw_planet": p_name,
             "is_benefic": is_benefic,
-            "is_hit": impact_text != "No Vedha"
+            "is_hit": impact_text != "No Vedha",
+            "progress": prog
         })
     return max(0, min(100, total_score)), data
 def get_market_intel(data):
@@ -222,8 +242,7 @@ def get_market_intel(data):
 
 def display_advisory(data):
     hits = [d for d in data if d['is_hit']]
-    if not hits:
-        return
+    if not hits: return
     
     st.markdown("### 🛡️ Astrological Advisory & Remedies")
     for hit in hits:
@@ -231,17 +250,41 @@ def display_advisory(data):
         adv = ADVISORY_DB.get(p_name)
         if not adv: continue
         
+        prog = hit.get('progress', 50)
+        rem = 100 - prog
+        
         if adv["type"] == "Malefic":
             st.error(f"**🔴 {p_name} is impacting you negatively ({hit['Impact & Score'].split('(')[0].strip()})**")
+            st.markdown(f"""
+            <div style="margin-top: -10px; margin-bottom: 15px; padding: 0 10px;">
+                <div style="display: flex; justify-content: space-between; font-size: 13px; color: #991B1B; font-weight: 600; margin-bottom: 5px;">
+                    <span>⏳ Transit Elapsed: {prog}%</span>
+                    <span>Remaining: {rem}% ⌛</span>
+                </div>
+                <div style="background-color: #FEE2E2; border-radius: 5px; height: 8px; width: 100%; border: 1px solid #FCA5A5; overflow: hidden;">
+                    <div style="background-color: #DC2626; width: {prog}%; height: 100%;"></div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
             st.markdown(f"- **Health:** {adv['health']}")
             st.markdown(f"- **Wealth/Actions:** {adv['wealth']}")
             st.markdown(f"- **Spiritual Remedy:** {adv['spiritual']}")
         else:
             st.success(f"**🟢 {p_name} is blessing you ({hit['Impact & Score'].split('(')[0].strip()})**")
+            st.markdown(f"""
+            <div style="margin-top: -10px; margin-bottom: 15px; padding: 0 10px;">
+                <div style="display: flex; justify-content: space-between; font-size: 13px; color: #065F46; font-weight: 600; margin-bottom: 5px;">
+                    <span>⏳ Transit Elapsed: {prog}%</span>
+                    <span>Remaining: {rem}% ⌛</span>
+                </div>
+                <div style="background-color: #D1FAE5; border-radius: 5px; height: 8px; width: 100%; border: 1px solid #6EE7B7; overflow: hidden;">
+                    <div style="background-color: #059669; width: {prog}%; height: 100%;"></div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
             st.markdown(f"- **Wealth/Actions (To Maximize):** {adv['wealth']}")
             st.markdown(f"- **Spiritual Enhancement:** {adv['spiritual']}")
 
-# --- PDF Generator ---
 def clean(text): return text.replace('\n', ' ').encode('ascii', 'ignore').decode('ascii')
 
 def generate_pdf(nak, pada, date_str, score, data, intel, is_long_term=False, chart_desc="", trend_data=None):
@@ -357,7 +400,7 @@ if view_mode == "Exact Time (Default)":
     
     st.subheader("📑 Detailed Planetary Matrix")
     df = pd.DataFrame(data)
-    display_df = df.drop(columns=['_bg', 'raw_planet', 'is_benefic', 'is_hit'])
+    display_df = df.drop(columns=['_bg', 'raw_planet', 'is_benefic', 'is_hit', 'progress'], errors='ignore')
     
     styled_df = display_df.style.apply(lambda r: [df.loc[r.name, '_bg']] * len(r), axis=1)
     st.dataframe(styled_df, use_container_width=True, hide_index=True, column_config={
@@ -473,7 +516,7 @@ elif view_mode == "Long-Term Forecast":
                 st.markdown(f"**Score for {selected_day}: {td['Score']}%**")
                 
                 df_daily = pd.DataFrame(td['daily_data'])
-                display_daily = df_daily.drop(columns=['_bg', 'raw_planet', 'is_benefic', 'is_hit'])
+                display_daily = df_daily.drop(columns=['_bg', 'raw_planet', 'is_benefic', 'is_hit', 'progress'], errors='ignore')
                 styled_daily = display_daily.style.apply(lambda r: [df_daily.loc[r.name, '_bg']] * len(r), axis=1)
                 
                 st.dataframe(styled_daily, use_container_width=True, hide_index=True, column_config={
