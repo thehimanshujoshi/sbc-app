@@ -1,5 +1,8 @@
 streamlit
-pandas
 pyswisseph
+pandas
 pytz
+python-dateutil
+geopy
+timezonefinder
 fpdf
