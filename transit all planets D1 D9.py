@@ -66,7 +66,6 @@ def get_planet_pos(name, date_obj, system_flag, flag_extra=0):
     utc_date = date_obj.astimezone(pytz.utc)
     jd = swe.julday(utc_date.year, utc_date.month, utc_date.day, utc_date.hour + utc_date.minute/60.0)
     
-    # REQUIRED FIX: Explicitly request SPEED calculation to fix the Retrograde bug
     calc_flag = system_flag | flag_extra | swe.FLG_SPEED
     
     if name in FIXED_STARS:
@@ -92,7 +91,6 @@ def get_astrological_status(name, longitude, speed, date_obj, system_flag):
     is_vargottama = (d1_sign == d9_sign)
     is_pushkar = (nav_abs_index % 9) in PUSHKAR_RULES.get(d1_index, [])
     
-    # Enforced Motion Logic utilizing the correctly generated 'speed' vector
     if name in ["Sun", "Moon"] or name in FIXED_STARS:
         motion = "Direct"
     elif name in ["Rahu", "Ketu"]:
@@ -231,7 +229,6 @@ def calculate_star_aspects(planets, stars, start_date, end_date, sys_flag):
     return df
 
 def get_datetime_from_jd(jd, local_tz):
-    """Converts Swiss Ephemeris Julian Day to localized Datetime object."""
     y, m, d, h = swe.revjul(jd)
     hours = int(h)
     mins = int((h - hours) * 60)
@@ -240,11 +237,7 @@ def get_datetime_from_jd(jd, local_tz):
     return utc_dt.astimezone(local_tz)
 
 def calculate_eclipses(start_date, end_date, sys_flag_output, local_tz, visibility_mode, lat, lon):
-    """
-    REQUIRED FIX: Eclipses are astronomical events. We MUST use FLG_SWIEPH (Geocentric Tropical)
-    to find the eclipse, otherwise the sidereal offset throws an error. We only use the sys_flag_output 
-    to format the resulting Navamsha sign.
-    """
+    """Panchang Engine: Calculates global eclipse, then checks local horizon visibility."""
     eclipses = []
     utc_start = start_date.astimezone(pytz.utc)
     utc_end = end_date.astimezone(pytz.utc)
@@ -257,26 +250,31 @@ def calculate_eclipses(start_date, end_date, sys_flag_output, local_tz, visibili
     jd = jd_start
     while True:
         try:
-            if visibility_mode == "Local Visibility":
-                tret, _ = swe.sol_eclipse_when_loc(jd, swe.FLG_SWIEPH, geopos, False)
-            else:
-                tret, _ = swe.sol_eclipse_when_glob(jd, swe.FLG_SWIEPH, 0, False)
-                
+            tret, _ = swe.sol_eclipse_when_glob(jd, swe.FLG_SWIEPH, 0, False)
             if tret[0] > jd_end or tret[0] == 0: break
             
-            max_dt = get_datetime_from_jd(tret[0], local_tz)
-            # Use the user's selected system flag (Vedic/Western) just to map the Zodiac sign
-            sun_lon, _, _ = get_planet_pos("Sun", max_dt, sys_flag_output)
-            status = get_astrological_status("Sun", sun_lon, 1.0, max_dt, sys_flag_output)
-            
-            eclipses.append({
-                "Date_Obj": max_dt,
-                "Eclipse Type": "☀️ Solar Eclipse",
-                "Max Time (Local)": max_dt.strftime("%d %b %Y, %I:%M %p"),
-                "Core Sign (D1)": status["D1"],
-                "Sub-Division (D9)": status["D9"]
-            })
-            jd = tret[0] + 5 # Jump past this eclipse to find the next
+            is_visible = True
+            if "Local" in visibility_mode:
+                # Panchang rule: Is the eclipse magnitude > 0 at this specific location?
+                try:
+                    _, attr = swe.sol_eclipse_how(tret[0], swe.FLG_SWIEPH, geopos)
+                    if attr[0] <= 0.0: is_visible = False
+                except:
+                    is_visible = False
+
+            if is_visible:
+                max_dt = get_datetime_from_jd(tret[0], local_tz)
+                sun_lon, _, _ = get_planet_pos("Sun", max_dt, sys_flag_output)
+                status = get_astrological_status("Sun", sun_lon, 1.0, max_dt, sys_flag_output)
+                
+                eclipses.append({
+                    "Date_Obj": max_dt,
+                    "Eclipse Type": "☀️ Solar Eclipse",
+                    "Max Time (Local)": max_dt.strftime("%d %b %Y, %I:%M %p"),
+                    "Core Sign (D1)": status["D1"],
+                    "Sub-Division (D9)": status["D9"]
+                })
+            jd = tret[0] + 5 # Jump past eclipse to avoid double counting
         except:
             break
             
@@ -284,24 +282,30 @@ def calculate_eclipses(start_date, end_date, sys_flag_output, local_tz, visibili
     jd = jd_start
     while True:
         try:
-            if visibility_mode == "Local Visibility":
-                tret, _ = swe.lun_eclipse_when_loc(jd, swe.FLG_SWIEPH, geopos, False)
-            else:
-                tret, _ = swe.lun_eclipse_when(jd, swe.FLG_SWIEPH, 0, False)
-                
+            tret, _ = swe.lun_eclipse_when(jd, swe.FLG_SWIEPH, 0, False)
             if tret[0] > jd_end or tret[0] == 0: break
             
-            max_dt = get_datetime_from_jd(tret[0], local_tz)
-            moon_lon, _, _ = get_planet_pos("Moon", max_dt, sys_flag_output)
-            status = get_astrological_status("Moon", moon_lon, 1.0, max_dt, sys_flag_output)
-            
-            eclipses.append({
-                "Date_Obj": max_dt,
-                "Eclipse Type": "🌕 Lunar Eclipse",
-                "Max Time (Local)": max_dt.strftime("%d %b %Y, %I:%M %p"),
-                "Core Sign (D1)": status["D1"],
-                "Sub-Division (D9)": status["D9"]
-            })
+            is_visible = True
+            if "Local" in visibility_mode:
+                # Panchang rule for Lunar: Is it night time / moon above horizon?
+                try:
+                    _, attr = swe.lun_eclipse_how(tret[0], swe.FLG_SWIEPH, geopos)
+                    if attr[0] <= 0.0: is_visible = False
+                except:
+                    is_visible = False
+
+            if is_visible:
+                max_dt = get_datetime_from_jd(tret[0], local_tz)
+                moon_lon, _, _ = get_planet_pos("Moon", max_dt, sys_flag_output)
+                status = get_astrological_status("Moon", moon_lon, 1.0, max_dt, sys_flag_output)
+                
+                eclipses.append({
+                    "Date_Obj": max_dt,
+                    "Eclipse Type": "🌕 Lunar Eclipse",
+                    "Max Time (Local)": max_dt.strftime("%d %b %Y, %I:%M %p"),
+                    "Core Sign (D1)": status["D1"],
+                    "Sub-Division (D9)": status["D9"]
+                })
             jd = tret[0] + 5
         except:
             break
@@ -348,7 +352,6 @@ if st.button("Generate Master Timeline", type="primary"):
         start_dt = local_tz.localize(datetime.datetime.combine(selected_start, datetime.time.min))
         end_dt = start_dt + relativedelta(months=durations[selected_dur])
         
-        # Initialize an empty list to gather all generated CSVs
         csv_data = {}
         
         # --- 1. Orbital Extremes ---
@@ -413,8 +416,6 @@ if st.button("Generate Master Timeline", type="primary"):
             if not df_transits.empty:
                 df_transits = df_transits.sort_values(by="Entry_Obj").drop(columns=["Entry_Obj"])
                 st.dataframe(df_transits, use_container_width=True, hide_index=True, column_config={"Entry Date": st.column_config.TextColumn("Entry Date", width="medium"), "Exit Date": st.column_config.TextColumn("Exit Date", width="medium")})
-                
-                # Create CSV bytes for main table
                 csv_data["Transits"] = df_transits.to_csv(index=False).encode('utf-8')
             else:
                 st.info("No major shifts found in the specified timeframe.")
@@ -431,14 +432,14 @@ if st.button("Generate Master Timeline", type="primary"):
                 else:
                     st.info("No exact alignments (0°, 90°, 120°) between selected planets and stars during this timeframe.")
 
-        # --- 4. Eclipse Tracker ---
+        # --- 4. Eclipse Tracker (Panchang Engine) ---
         st.markdown("---")
-        
         col_A, col_B = st.columns([2, 1])
         with col_A:
-            st.subheader("🌑 Eclipse Radar")
+            st.subheader("🌑 Eclipse Radar (Panchang Engine)")
         with col_B:
-            visibility_mode = st.radio("Eclipse Search Mode", ["Global (Anywhere on Earth)", "Local Visibility"], index=0, label_visibility="collapsed", horizontal=True)
+            # DEFAULT is now set to Local (index 0)
+            visibility_mode = st.radio("Eclipse Search Mode", ["Local (Panchang Visibility)", "Global (Anywhere on Earth)"], index=0, label_visibility="collapsed", horizontal=True)
 
         with st.spinner("Scanning for eclipses..."):
             df_eclipses = calculate_eclipses(start_dt, end_dt, sys_flag, local_tz, visibility_mode, loc_lat, loc_lon)
@@ -451,7 +452,7 @@ if st.button("Generate Master Timeline", type="primary"):
                 )
                 csv_data["Eclipses"] = df_eclipses.to_csv(index=False).encode('utf-8')
             else:
-                if visibility_mode == "Local Visibility":
+                if "Local" in visibility_mode:
                     st.success(f"No Solar or Lunar Eclipses are visibly occurring in {formatted_address} during this timeframe.")
                 else:
                     st.success("No Solar or Lunar Eclipses occur globally during this timeframe.")
