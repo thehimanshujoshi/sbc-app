@@ -20,7 +20,6 @@ PLANETS = {
     "Saturn": swe.SATURN, "Rahu": swe.MEAN_NODE, "Ketu": "KETU"
 }
 
-# Prominent Fixed Stars (Yogataras in Vedic)
 FIXED_STARS = [
     "Algol", "Alcyone", "Aldebaran", "Rigel", "Capella", "Betelgeuse", 
     "Sirius", "Procyon", "Regulus", "Spica", "Arcturus", "Antares", 
@@ -167,33 +166,26 @@ def calculate_lat_dec_extremes(name, start_date, end_date, sys_flag):
     return events
 
 def find_exact_aspect(planet, star, target_angle, start_t, end_t, sys_flag):
-    """Binary search to find the exact minute a planet hits a specific aspect angle with a star."""
     while (end_t - start_t).total_seconds() > 60:
         mid_t = start_t + (end_t - start_t) / 2
         p_lon, _, _ = get_planet_pos(planet, mid_t, sys_flag)
         s_lon, _, _ = get_planet_pos(star, mid_t, sys_flag)
         mid_angle = (p_lon - s_lon) % 360.0
         
-        # Calculate angular distance from target to determine direction
         diff_start = ((get_planet_pos(planet, start_t, sys_flag)[0] - get_planet_pos(star, start_t, sys_flag)[0]) % 360.0 - target_angle)
         diff_mid = (mid_angle - target_angle)
         
-        # Adjust for 360 degree wrap arounds during subtraction
         if diff_start > 180: diff_start -= 360
         elif diff_start < -180: diff_start += 360
         if diff_mid > 180: diff_mid -= 360
         elif diff_mid < -180: diff_mid += 360
 
-        if diff_start * diff_mid <= 0:
-            end_t = mid_t
-        else:
-            start_t = mid_t
+        if diff_start * diff_mid <= 0: end_t = mid_t
+        else: start_t = mid_t
     return end_t
 
 def calculate_star_aspects(planets, stars, start_date, end_date, sys_flag):
-    """Scans for Exact Aspects (Conjunction, Square, Trine) between planets and stars."""
     aspects = []
-    # Only calculate for actual planets (exclude nodes as they are math points, not light bodies)
     valid_planets = [p for p in planets if p not in ["Rahu", "Ketu"]]
     
     for planet in valid_planets:
@@ -209,9 +201,7 @@ def calculate_star_aspects(planets, stars, start_date, end_date, sys_flag):
                 angle1 = (p_lon1 - s_lon1) % 360.0
                 angle2 = (p_lon2 - s_lon2) % 360.0
                 
-                # Check if it crosses any of our target aspects
                 for target in ASPECT_TARGETS.keys():
-                    # Handle 360 wrap around safely
                     diff1 = angle1 - target
                     diff2 = angle2 - target
                     if diff1 > 180: diff1 -= 360
@@ -219,7 +209,7 @@ def calculate_star_aspects(planets, stars, start_date, end_date, sys_flag):
                     if diff2 > 180: diff2 -= 360
                     elif diff2 < -180: diff2 += 360
                     
-                    if diff1 * diff2 <= 0: # Crossover detected
+                    if diff1 * diff2 <= 0:
                         exact_time = find_exact_aspect(planet, star, target, curr_d, next_d, sys_flag)
                         if start_date <= exact_time <= end_date:
                             aspects.append({
@@ -234,6 +224,71 @@ def calculate_star_aspects(planets, stars, start_date, end_date, sys_flag):
     df = pd.DataFrame(aspects)
     if not df.empty:
         df = df.sort_values(by="Exact_Time_Obj").drop(columns=["Exact_Time_Obj"])
+    return df
+
+def get_datetime_from_jd(jd, local_tz):
+    """Converts Swiss Ephemeris Julian Day to localized Datetime object."""
+    y, m, d, h = swe.revjul(jd)
+    hours = int(h)
+    mins = int((h - hours) * 60)
+    secs = int((((h - hours) * 60) - mins) * 60)
+    utc_dt = datetime.datetime(y, m, d, hours, mins, secs, tzinfo=pytz.utc)
+    return utc_dt.astimezone(local_tz)
+
+def calculate_eclipses(start_date, end_date, sys_flag, local_tz):
+    eclipses = []
+    utc_start = start_date.astimezone(pytz.utc)
+    utc_end = end_date.astimezone(pytz.utc)
+    jd_start = swe.julday(utc_start.year, utc_start.month, utc_start.day, utc_start.hour + utc_start.minute/60.0)
+    jd_end = swe.julday(utc_end.year, utc_end.month, utc_end.day, utc_end.hour + utc_end.minute/60.0)
+
+    # Solar Eclipses
+    jd = jd_start
+    while True:
+        try:
+            tret, attr = swe.sol_eclipse_when_glob(jd, sys_flag, 0, False)
+            if tret[0] > jd_end: break
+            
+            max_dt = get_datetime_from_jd(tret[0], local_tz)
+            sun_lon, _, _ = get_planet_pos("Sun", max_dt, sys_flag)
+            status = get_astrological_status("Sun", sun_lon, 1.0, max_dt, sys_flag)
+            
+            eclipses.append({
+                "Date_Obj": max_dt,
+                "Eclipse Type": "☀️ Solar Eclipse",
+                "Max Time (Local)": max_dt.strftime("%d %b %Y, %I:%M %p"),
+                "Core Sign (D1)": status["D1"],
+                "Sub-Division (D9)": status["D9"]
+            })
+            jd = tret[0] + 5
+        except:
+            break
+            
+    # Lunar Eclipses
+    jd = jd_start
+    while True:
+        try:
+            tret, attr = swe.lun_eclipse_when(jd, sys_flag, 0, False)
+            if tret[0] > jd_end: break
+            
+            max_dt = get_datetime_from_jd(tret[0], local_tz)
+            moon_lon, _, _ = get_planet_pos("Moon", max_dt, sys_flag)
+            status = get_astrological_status("Moon", moon_lon, 1.0, max_dt, sys_flag)
+            
+            eclipses.append({
+                "Date_Obj": max_dt,
+                "Eclipse Type": "🌕 Lunar Eclipse",
+                "Max Time (Local)": max_dt.strftime("%d %b %Y, %I:%M %p"),
+                "Core Sign (D1)": status["D1"],
+                "Sub-Division (D9)": status["D9"]
+            })
+            jd = tret[0] + 5
+        except:
+            break
+            
+    df = pd.DataFrame(eclipses)
+    if not df.empty:
+        df = df.sort_values(by="Date_Obj").drop(columns=["Date_Obj"])
     return df
 
 # --- UI Setup ---
@@ -255,7 +310,7 @@ st.title("Pro Astrological Engine")
 col1, col2 = st.columns(2)
 with col1: selected_start = st.date_input("Start Date", datetime.date.today())
 with col2:
-    durations = {"1 Month": 1, "3 Months": 3, "6 Months": 6, "1 Year": 12, "2 Years": 24}
+    durations = {"1 Month": 1, "3 Months": 3, "6 Months": 6, "1 Year": 12, "2 Years": 24, "5 Years": 60}
     selected_dur = st.selectbox("Timeline Duration", list(durations.keys()), index=1)
 
 st.markdown("### Select Celestial Bodies to Track")
@@ -342,19 +397,27 @@ if st.button("Generate Master Timeline", type="primary"):
         if selected_planets and selected_stars:
             st.markdown("---")
             st.subheader("✨ Stellar Alignments (Planet to Fixed Star Aspects)")
-            st.markdown("Tracks pinpoint exact timings for Conjunctions (0°), Squares (90°), and Trines (120°) between tracked planets and selected stars.")
-            
             with st.spinner("Calculating high-precision star aspects..."):
                 df_aspects = calculate_star_aspects(selected_planets, selected_stars, start_dt, end_dt, sys_flag)
-                
                 if not df_aspects.empty:
-                    st.dataframe(
-                        df_aspects, 
-                        use_container_width=True, 
-                        hide_index=True,
-                        column_config={
-                            "Date/Time (Exact)": st.column_config.TextColumn("Date/Time (Exact)", width="medium")
-                        }
-                    )
+                    st.dataframe(df_aspects, use_container_width=True, hide_index=True, column_config={"Date/Time (Exact)": st.column_config.TextColumn("Date/Time (Exact)", width="medium")})
                 else:
                     st.info("No exact alignments (0°, 90°, 120°) between selected planets and stars during this timeframe.")
+
+        # --- 4. Eclipse Tracker (NEW Addition) ---
+        st.markdown("---")
+        st.subheader("🌑 Global Eclipse Radar")
+        st.markdown("Detects highly potent Solar and Lunar eclipses occurring within your selected timeline, providing the exact maximum local time and their Zodiacal footprint.")
+        with st.spinner("Scanning for eclipses..."):
+            df_eclipses = calculate_eclipses(start_dt, end_dt, sys_flag, local_tz)
+            if not df_eclipses.empty:
+                st.dataframe(
+                    df_eclipses, 
+                    use_container_width=True, 
+                    hide_index=True,
+                    column_config={
+                        "Max Time (Local)": st.column_config.TextColumn("Max Time (Local)", width="medium")
+                    }
+                )
+            else:
+                st.success("No Solar or Lunar Eclipses occur during this specific timeframe.")
