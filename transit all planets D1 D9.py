@@ -49,22 +49,25 @@ PUSHKAR_RULES = {
 
 # --- Core Functions ---
 @st.cache_data
-def get_location_tz(city_name):
+def get_location_data(city_name):
+    """Fetches Timezone, Latitude, and Longitude based on city name."""
     geolocator = Nominatim(user_agent="astrology_app")
     try:
         location = geolocator.geocode(city_name)
         if location:
             tf = TimezoneFinder()
             tz_name = tf.timezone_at(lng=location.longitude, lat=location.latitude)
-            return pytz.timezone(tz_name), location.address
+            return pytz.timezone(tz_name), location.address, location.latitude, location.longitude
     except:
         pass
-    return None, None
+    return None, None, 0.0, 0.0
 
 def get_planet_pos(name, date_obj, system_flag, flag_extra=0):
     utc_date = date_obj.astimezone(pytz.utc)
     jd = swe.julday(utc_date.year, utc_date.month, utc_date.day, utc_date.hour + utc_date.minute/60.0)
-    calc_flag = system_flag | flag_extra
+    
+    # REQUIRED FIX: Explicitly request SPEED calculation to fix the Retrograde bug
+    calc_flag = system_flag | flag_extra | swe.FLG_SPEED
     
     if name in FIXED_STARS:
         try:
@@ -89,6 +92,7 @@ def get_astrological_status(name, longitude, speed, date_obj, system_flag):
     is_vargottama = (d1_sign == d9_sign)
     is_pushkar = (nav_abs_index % 9) in PUSHKAR_RULES.get(d1_index, [])
     
+    # Enforced Motion Logic utilizing the correctly generated 'speed' vector
     if name in ["Sun", "Moon"] or name in FIXED_STARS:
         motion = "Direct"
     elif name in ["Rahu", "Ketu"]:
@@ -235,23 +239,35 @@ def get_datetime_from_jd(jd, local_tz):
     utc_dt = datetime.datetime(y, m, d, hours, mins, secs, tzinfo=pytz.utc)
     return utc_dt.astimezone(local_tz)
 
-def calculate_eclipses(start_date, end_date, sys_flag, local_tz):
+def calculate_eclipses(start_date, end_date, sys_flag_output, local_tz, visibility_mode, lat, lon):
+    """
+    REQUIRED FIX: Eclipses are astronomical events. We MUST use FLG_SWIEPH (Geocentric Tropical)
+    to find the eclipse, otherwise the sidereal offset throws an error. We only use the sys_flag_output 
+    to format the resulting Navamsha sign.
+    """
     eclipses = []
     utc_start = start_date.astimezone(pytz.utc)
     utc_end = end_date.astimezone(pytz.utc)
     jd_start = swe.julday(utc_start.year, utc_start.month, utc_start.day, utc_start.hour + utc_start.minute/60.0)
     jd_end = swe.julday(utc_end.year, utc_end.month, utc_end.day, utc_end.hour + utc_end.minute/60.0)
 
+    geopos = (lon, lat, 0.0)
+
     # Solar Eclipses
     jd = jd_start
     while True:
         try:
-            tret, attr = swe.sol_eclipse_when_glob(jd, sys_flag, 0, False)
-            if tret[0] > jd_end: break
+            if visibility_mode == "Local Visibility":
+                tret, _ = swe.sol_eclipse_when_loc(jd, swe.FLG_SWIEPH, geopos, False)
+            else:
+                tret, _ = swe.sol_eclipse_when_glob(jd, swe.FLG_SWIEPH, 0, False)
+                
+            if tret[0] > jd_end or tret[0] == 0: break
             
             max_dt = get_datetime_from_jd(tret[0], local_tz)
-            sun_lon, _, _ = get_planet_pos("Sun", max_dt, sys_flag)
-            status = get_astrological_status("Sun", sun_lon, 1.0, max_dt, sys_flag)
+            # Use the user's selected system flag (Vedic/Western) just to map the Zodiac sign
+            sun_lon, _, _ = get_planet_pos("Sun", max_dt, sys_flag_output)
+            status = get_astrological_status("Sun", sun_lon, 1.0, max_dt, sys_flag_output)
             
             eclipses.append({
                 "Date_Obj": max_dt,
@@ -260,7 +276,7 @@ def calculate_eclipses(start_date, end_date, sys_flag, local_tz):
                 "Core Sign (D1)": status["D1"],
                 "Sub-Division (D9)": status["D9"]
             })
-            jd = tret[0] + 5
+            jd = tret[0] + 5 # Jump past this eclipse to find the next
         except:
             break
             
@@ -268,12 +284,16 @@ def calculate_eclipses(start_date, end_date, sys_flag, local_tz):
     jd = jd_start
     while True:
         try:
-            tret, attr = swe.lun_eclipse_when(jd, sys_flag, 0, False)
-            if tret[0] > jd_end: break
+            if visibility_mode == "Local Visibility":
+                tret, _ = swe.lun_eclipse_when_loc(jd, swe.FLG_SWIEPH, geopos, False)
+            else:
+                tret, _ = swe.lun_eclipse_when(jd, swe.FLG_SWIEPH, 0, False)
+                
+            if tret[0] > jd_end or tret[0] == 0: break
             
             max_dt = get_datetime_from_jd(tret[0], local_tz)
-            moon_lon, _, _ = get_planet_pos("Moon", max_dt, sys_flag)
-            status = get_astrological_status("Moon", moon_lon, 1.0, max_dt, sys_flag)
+            moon_lon, _, _ = get_planet_pos("Moon", max_dt, sys_flag_output)
+            status = get_astrological_status("Moon", moon_lon, 1.0, max_dt, sys_flag_output)
             
             eclipses.append({
                 "Date_Obj": max_dt,
@@ -290,15 +310,15 @@ def calculate_eclipses(start_date, end_date, sys_flag, local_tz):
     if not df.empty:
         df = df.sort_values(by="Date_Obj").drop(columns=["Date_Obj"])
     return df
-
 # --- UI Setup ---
 st.sidebar.header("⚙️ Settings")
 astrology_system = st.sidebar.radio("Astrology System", ["Vedic (Lahiri Ayanamsa)", "Western (Tropical)"])
 
 location_input = st.sidebar.text_input("Enter City", "Mumbai, India")
-local_tz, formatted_address = get_location_tz(location_input)
+local_tz, formatted_address, loc_lat, loc_lon = get_location_data(location_input)
 
 if not local_tz: local_tz = pytz.utc
+
 sys_flag = swe.FLG_SWIEPH
 if "Vedic" in astrology_system:
     swe.set_sid_mode(swe.SIDM_LAHIRI)
@@ -311,7 +331,7 @@ col1, col2 = st.columns(2)
 with col1: selected_start = st.date_input("Start Date", datetime.date.today())
 with col2:
     durations = {"1 Month": 1, "3 Months": 3, "6 Months": 6, "1 Year": 12, "2 Years": 24, "5 Years": 60}
-    selected_dur = st.selectbox("Timeline Duration", list(durations.keys()), index=1)
+    selected_dur = st.selectbox("Timeline Duration", list(durations.keys()), index=3)
 
 st.markdown("### Select Celestial Bodies to Track")
 selected_planets = st.pills("Planets", options=list(PLANETS.keys()), default=["Sun", "Moon", "Saturn"], selection_mode="multi", label_visibility="collapsed")
@@ -327,6 +347,9 @@ if st.button("Generate Master Timeline", type="primary"):
     else:
         start_dt = local_tz.localize(datetime.datetime.combine(selected_start, datetime.time.min))
         end_dt = start_dt + relativedelta(months=durations[selected_dur])
+        
+        # Initialize an empty list to gather all generated CSVs
+        csv_data = {}
         
         # --- 1. Orbital Extremes ---
         st.markdown("---")
@@ -390,6 +413,9 @@ if st.button("Generate Master Timeline", type="primary"):
             if not df_transits.empty:
                 df_transits = df_transits.sort_values(by="Entry_Obj").drop(columns=["Entry_Obj"])
                 st.dataframe(df_transits, use_container_width=True, hide_index=True, column_config={"Entry Date": st.column_config.TextColumn("Entry Date", width="medium"), "Exit Date": st.column_config.TextColumn("Exit Date", width="medium")})
+                
+                # Create CSV bytes for main table
+                csv_data["Transits"] = df_transits.to_csv(index=False).encode('utf-8')
             else:
                 st.info("No major shifts found in the specified timeframe.")
 
@@ -401,23 +427,40 @@ if st.button("Generate Master Timeline", type="primary"):
                 df_aspects = calculate_star_aspects(selected_planets, selected_stars, start_dt, end_dt, sys_flag)
                 if not df_aspects.empty:
                     st.dataframe(df_aspects, use_container_width=True, hide_index=True, column_config={"Date/Time (Exact)": st.column_config.TextColumn("Date/Time (Exact)", width="medium")})
+                    csv_data["Stellar_Aspects"] = df_aspects.to_csv(index=False).encode('utf-8')
                 else:
                     st.info("No exact alignments (0°, 90°, 120°) between selected planets and stars during this timeframe.")
 
-        # --- 4. Eclipse Tracker (NEW Addition) ---
+        # --- 4. Eclipse Tracker ---
         st.markdown("---")
-        st.subheader("🌑 Global Eclipse Radar")
-        st.markdown("Detects highly potent Solar and Lunar eclipses occurring within your selected timeline, providing the exact maximum local time and their Zodiacal footprint.")
+        
+        col_A, col_B = st.columns([2, 1])
+        with col_A:
+            st.subheader("🌑 Eclipse Radar")
+        with col_B:
+            visibility_mode = st.radio("Eclipse Search Mode", ["Global (Anywhere on Earth)", "Local Visibility"], index=0, label_visibility="collapsed", horizontal=True)
+
         with st.spinner("Scanning for eclipses..."):
-            df_eclipses = calculate_eclipses(start_dt, end_dt, sys_flag, local_tz)
+            df_eclipses = calculate_eclipses(start_dt, end_dt, sys_flag, local_tz, visibility_mode, loc_lat, loc_lon)
             if not df_eclipses.empty:
                 st.dataframe(
                     df_eclipses, 
                     use_container_width=True, 
                     hide_index=True,
-                    column_config={
-                        "Max Time (Local)": st.column_config.TextColumn("Max Time (Local)", width="medium")
-                    }
+                    column_config={"Max Time (Local)": st.column_config.TextColumn("Max Time (Local)", width="medium")}
                 )
+                csv_data["Eclipses"] = df_eclipses.to_csv(index=False).encode('utf-8')
             else:
-                st.success("No Solar or Lunar Eclipses occur during this specific timeframe.")
+                if visibility_mode == "Local Visibility":
+                    st.success(f"No Solar or Lunar Eclipses are visibly occurring in {formatted_address} during this timeframe.")
+                else:
+                    st.success("No Solar or Lunar Eclipses occur globally during this timeframe.")
+                    
+        # --- Export Data Buttons ---
+        if csv_data:
+            st.markdown("---")
+            st.markdown("### 📥 Download Reports")
+            dl_cols = st.columns(len(csv_data))
+            for i, (name, file_bytes) in enumerate(csv_data.items()):
+                with dl_cols[i]:
+                    st.download_button(label=f"Download {name} (CSV)", data=file_bytes, file_name=f"{name.lower()}_report.csv", mime="text/csv")
