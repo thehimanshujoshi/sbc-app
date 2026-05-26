@@ -20,6 +20,13 @@ PLANETS = {
     "Saturn": swe.SATURN, "Rahu": swe.MEAN_NODE, "Ketu": "KETU"
 }
 
+# Prominent Fixed Stars for Western Tropical mode
+FIXED_STARS = [
+    "Algol", "Alcyone", "Aldebaran", "Rigel", "Capella", "Betelgeuse", 
+    "Sirius", "Procyon", "Regulus", "Spica", "Arcturus", "Antares", 
+    "Vega", "Altair", "Fomalhaut"
+]
+
 COMBUSTION_LIMITS = {
     "Moon": 12, "Mars": 17, "Jupiter": 11, "Saturn": 15,
     "Mercury": {"Direct": 14, "Retrograde": 12},
@@ -47,26 +54,29 @@ def get_location_tz(city_name):
         pass
     return None, None
 
-def get_planet_pos(planet_name, date_obj, system_flag, flag_extra=0):
+def get_planet_pos(name, date_obj, system_flag, flag_extra=0):
     utc_date = date_obj.astimezone(pytz.utc)
     jd = swe.julday(utc_date.year, utc_date.month, utc_date.day, utc_date.hour + utc_date.minute/60.0)
-    
     calc_flag = system_flag | flag_extra
     
-    if planet_name == "Ketu":
+    # Handle Fixed Stars
+    if name in FIXED_STARS:
+        try:
+            pos, _ = swe.fixstar2_ut(name, jd, calc_flag)
+            return pos[0], pos[1], pos[3] # longitude, latitude, speed
+        except:
+            return 0.0, 0.0, 0.0
+            
+    # Handle Ketu (Opposite Rahu)
+    if name == "Ketu":
         pos, _ = swe.calc_ut(jd, PLANETS["Rahu"], calc_flag)
-        longitude = (pos[0] + 180.0) % 360.0
-        latitude = -pos[1]
-        speed = pos[3]
-    else:
-        pos, _ = swe.calc_ut(jd, PLANETS[planet_name], calc_flag)
-        longitude = pos[0]
-        latitude = pos[1]
-        speed = pos[3]
+        return (pos[0] + 180.0) % 360.0, -pos[1], pos[3]
         
-    return longitude, latitude, speed
+    # Handle standard planets
+    pos, _ = swe.calc_ut(jd, PLANETS[name], calc_flag)
+    return pos[0], pos[1], pos[3]
 
-def get_astrological_status(planet_name, longitude, speed, date_obj, system_flag):
+def get_astrological_status(name, longitude, speed, date_obj, system_flag):
     d1_index = int(longitude / 30.0)
     d1_sign = ZODIAC_SIGNS[d1_index]
     
@@ -76,18 +86,20 @@ def get_astrological_status(planet_name, longitude, speed, date_obj, system_flag
     is_vargottama = (d1_sign == d9_sign)
     is_pushkar = (nav_abs_index % 9) in PUSHKAR_RULES.get(d1_index, [])
     
-    if planet_name in ["Sun", "Moon"]:
+    # Strictly define motion
+    if name in ["Sun", "Moon"] or name in FIXED_STARS:
         motion = "Direct"
-    elif planet_name in ["Rahu", "Ketu"]:
+    elif name in ["Rahu", "Ketu"]:
         motion = "Retrograde"
     else:
         motion = "Retrograde" if speed < 0 else "Direct"
         
+    # Fixed stars don't get combust in the same way, skip them
     is_combust = False
-    if planet_name not in ["Sun", "Rahu", "Ketu"]:
+    if name not in ["Sun", "Rahu", "Ketu"] and name not in FIXED_STARS:
         sun_lon, _, _ = get_planet_pos("Sun", date_obj, system_flag)
         angular_dist = min((longitude - sun_lon) % 360, (sun_lon - longitude) % 360)
-        limit = COMBUSTION_LIMITS.get(planet_name)
+        limit = COMBUSTION_LIMITS.get(name)
         if isinstance(limit, dict): limit = limit[motion]
         if angular_dist <= limit: is_combust = True
             
@@ -96,10 +108,10 @@ def get_astrological_status(planet_name, longitude, speed, date_obj, system_flag
         "Motion": motion, "Vargottama": is_vargottama, "Pushkar": is_pushkar, "Combust": is_combust
     }
 
-def find_exact_transit_time(planet, start_t, end_t, start_nav_idx, sys_flag):
+def find_exact_transit_time(name, start_t, end_t, start_nav_idx, sys_flag):
     while (end_t - start_t).total_seconds() > 60:
         mid_t = start_t + (end_t - start_t) / 2
-        lon, _, _ = get_planet_pos(planet, mid_t, sys_flag)
+        lon, _, _ = get_planet_pos(name, mid_t, sys_flag)
         mid_nav_idx = int(lon / (360.0 / 108.0))
         
         if mid_nav_idx == start_nav_idx:
@@ -108,12 +120,11 @@ def find_exact_transit_time(planet, start_t, end_t, start_nav_idx, sys_flag):
             end_t = mid_t
     return end_t
 
-def find_exact_zero_cross(planet, start_t, end_t, sys_flag, flag_extra):
-    """Binary search for exact zero crossing time."""
+def find_exact_zero_cross(name, start_t, end_t, sys_flag, flag_extra):
     while (end_t - start_t).total_seconds() > 60:
         mid_t = start_t + (end_t - start_t) / 2
-        _, lat1, _ = get_planet_pos(planet, start_t, sys_flag, flag_extra)
-        _, mid_lat, _ = get_planet_pos(planet, mid_t, sys_flag, flag_extra)
+        _, lat1, _ = get_planet_pos(name, start_t, sys_flag, flag_extra)
+        _, mid_lat, _ = get_planet_pos(name, mid_t, sys_flag, flag_extra)
         
         if lat1 * mid_lat <= 0:
             end_t = mid_t
@@ -121,49 +132,55 @@ def find_exact_zero_cross(planet, start_t, end_t, sys_flag, flag_extra):
             start_t = mid_t
     return end_t
 
-def calculate_lat_dec_extremes(planet, start_date, end_date, sys_flag):
+def calculate_lat_dec_extremes(name, start_date, end_date, sys_flag):
+    # Skip Rahu and Ketu as their latitude is inherently zero
+    if name in ["Rahu", "Ketu"]:
+        return []
+        
     events = []
     current_date = start_date
-    
-    # Pass 1: Scan day by day to find the rough window
     data = []
+    
     while current_date <= end_date:
-        _, ecl_lat, _ = get_planet_pos(planet, current_date, sys_flag)
-        _, eq_dec, _ = get_planet_pos(planet, current_date, sys_flag, swe.FLG_EQUATORIAL)
+        _, ecl_lat, _ = get_planet_pos(name, current_date, sys_flag)
+        _, eq_dec, _ = get_planet_pos(name, current_date, sys_flag, swe.FLG_EQUATORIAL)
         data.append((current_date, ecl_lat, eq_dec))
         current_date += datetime.timedelta(days=1)
         
-    # Pass 2: Pinpoint exact times
     for i in range(1, len(data) - 1):
         prev_d, prev_lat, prev_dec = data[i-1]
         curr_d, curr_lat, curr_dec = data[i]
         next_d, next_lat, next_dec = data[i+1]
         
-        # Ecliptic Lat Zero Crossover
         if prev_lat * curr_lat <= 0:
-            exact_time = find_exact_zero_cross(planet, prev_d, curr_d, sys_flag, 0)
-            events.append({"Type": "Lat Zero Cross", "Value": "0.00°", "Date": exact_time.strftime("%d %b %Y, %I:%M %p")})
+            exact_time = find_exact_zero_cross(name, prev_d, curr_d, sys_flag, 0)
+            events.append({"Type": "Lat Zero Cross", "Value": "0.00°", "Date": exact_time})
             
-        # Equat Dec Zero Crossover
         if prev_dec * curr_dec <= 0:
-            exact_time = find_exact_zero_cross(planet, prev_d, curr_d, sys_flag, swe.FLG_EQUATORIAL)
-            events.append({"Type": "Dec Zero Cross", "Value": "0.00°", "Date": exact_time.strftime("%d %b %Y, %I:%M %p")})
+            exact_time = find_exact_zero_cross(name, prev_d, curr_d, sys_flag, swe.FLG_EQUATORIAL)
+            events.append({"Type": "Dec Zero Cross", "Value": "0.00°", "Date": exact_time})
             
-        # Max/Min Peaks (Scan by hour within the 48 hour window)
         if (prev_lat < curr_lat and curr_lat > next_lat) or (prev_lat > curr_lat and curr_lat < next_lat):
             peak_val = curr_lat
             peak_time = curr_d
             scan_time = prev_d
             while scan_time <= next_d:
-                _, scan_lat, _ = get_planet_pos(planet, scan_time, sys_flag)
+                _, scan_lat, _ = get_planet_pos(name, scan_time, sys_flag)
                 if (prev_lat < curr_lat and scan_lat > peak_val) or (prev_lat > curr_lat and scan_lat < peak_val):
                     peak_val = scan_lat
                     peak_time = scan_time
                 scan_time += datetime.timedelta(hours=1)
             
             label = "Lat Max" if prev_lat < curr_lat else "Lat Min"
-            events.append({"Type": label, "Value": f"{peak_val:.4f}°", "Date": peak_time.strftime("%d %b %Y, %I:%M %p")})
+            events.append({"Type": label, "Value": f"{peak_val:.4f}°", "Date": peak_time})
             
+    # Sort events chronologically just to be safe
+    events = sorted(events, key=lambda x: x["Date"])
+    
+    # Format dates for display
+    for e in events:
+        e["Date_Str"] = e["Date"].strftime("%d %b %Y, %I:%M %p")
+        
     return events
 
 # --- UI Setup ---
@@ -188,10 +205,10 @@ col1, col2 = st.columns(2)
 with col1:
     selected_start = st.date_input("Start Date", datetime.date.today())
 with col2:
-    durations = {"1 Month": 1, "3 Months": 3, "6 Months": 6, "1 Year": 12}
-    selected_dur = st.selectbox("Timeline Duration", list(durations.keys()), index=0)
+    durations = {"1 Month": 1, "3 Months": 3, "6 Months": 6, "1 Year": 12, "2 Years": 24}
+    selected_dur = st.selectbox("Timeline Duration", list(durations.keys()), index=1)
 
-st.markdown("### Select Planets to Track")
+st.markdown("### Select Celestial Bodies to Track")
 selected_planets = st.pills(
     "Planets", 
     options=list(PLANETS.keys()), 
@@ -200,46 +217,70 @@ selected_planets = st.pills(
     label_visibility="collapsed"
 )
 
+selected_stars = []
+if "Western" in astrology_system:
+    st.markdown("#### Prominent Fixed Stars")
+    selected_stars = st.pills(
+        "Fixed Stars", 
+        options=FIXED_STARS, 
+        selection_mode="multi",
+        label_visibility="collapsed"
+    )
+
+selected_bodies = []
+if selected_planets: selected_bodies.extend(selected_planets)
+if selected_stars: selected_bodies.extend(selected_stars)
+
 if st.button("Generate Timeline & Data", type="primary"):
-    if not selected_planets:
-        st.warning("Please select at least one planet.")
+    if not selected_bodies:
+        st.warning("Please select at least one celestial body.")
     else:
         start_dt = local_tz.localize(datetime.datetime.combine(selected_start, datetime.time.min))
         end_dt = start_dt + relativedelta(months=durations[selected_dur])
         
         # --- 1. Orbital Extremes ---
         st.markdown("---")
-        st.subheader("🪐 Orbital Extremes (Ecliptic Latitude & Equatorial Declination)")
+        st.subheader("🪐 Orbital Extremes (Ecliptic Lat & Equatorial Dec)")
         
-        cols = st.columns(len(selected_planets))
-        for idx, planet in enumerate(selected_planets):
-            with cols[idx]:
-                with st.expander(f"{planet} Data", expanded=True):
-                    events = calculate_lat_dec_extremes(planet, start_dt, end_dt, sys_flag)
-                    if not events:
-                        st.write("No extremes in this timeframe.")
-                    else:
-                        for e in events:
-                            st.markdown(f"**{e['Type']}**: {e['Value']} <br> <small>{e['Date']}</small>", unsafe_allow_html=True)
+        # Filter out nodes for extreme calculations visually
+        bodies_for_extremes = [b for b in selected_bodies if b not in ["Rahu", "Ketu"]]
+        
+        if bodies_for_extremes:
+            cols = st.columns(len(bodies_for_extremes) if len(bodies_for_extremes) < 4 else 4)
+            for idx, body in enumerate(bodies_for_extremes):
+                # Wrap to next row of columns if more than 4
+                col_idx = idx % 4 
+                with cols[col_idx]:
+                    # expanded=False forces the card to stay closed until the user clicks it
+                    with st.expander(f"{body} Data", expanded=False):
+                        events = calculate_lat_dec_extremes(body, start_dt, end_dt, sys_flag)
+                        if not events:
+                            st.write("No extremes or crossovers in this timeframe.")
+                        else:
+                            for e in events:
+                                st.markdown(f"**{e['Type']}**: {e['Value']} <br> <small>{e['Date_Str']}</small>", unsafe_allow_html=True)
+        else:
+            st.info("No bodies selected that possess ecliptic latitude variations (e.g., Nodes).")
 
-        # --- 2. Navamsha Transit Table ---
+        # --- 2. 9th Harmonic / Navamsha Transit Table ---
         st.markdown("---")
-        st.subheader("Navamsha Transit Timeline")
+        st.subheader(f"Timeline: {'Navamsha (D9)' if 'Vedic' in astrology_system else '9th Harmonic (Novile)'} Shifts")
         
         with st.spinner("Crunching ephemeris data..."):
             all_transits = []
-            for planet in selected_planets:
+            for body in selected_bodies:
                 current_date = start_dt
-                lon, _, speed = get_planet_pos(planet, current_date, sys_flag)
-                status = get_astrological_status(planet, lon, speed, current_date, sys_flag)
+                lon, _, speed = get_planet_pos(body, current_date, sys_flag)
+                status = get_astrological_status(body, lon, speed, current_date, sys_flag)
                 entry_date = current_date
                 
+                # Check positions every 6 hours
                 while current_date <= end_dt:
                     next_date = current_date + datetime.timedelta(hours=6)
                     if next_date > end_dt: break
                     
-                    next_lon, _, next_speed = get_planet_pos(planet, next_date, sys_flag)
-                    next_status = get_astrological_status(planet, next_lon, next_speed, next_date, sys_flag)
+                    next_lon, _, next_speed = get_planet_pos(body, next_date, sys_flag)
+                    next_status = get_astrological_status(body, next_lon, next_speed, next_date, sys_flag)
                     
                     if (status["Nav_Idx"] != next_status["Nav_Idx"] or 
                         status["Motion"] != next_status["Motion"] or 
@@ -247,7 +288,7 @@ if st.button("Generate Timeline & Data", type="primary"):
                         
                         exact_time = next_date
                         if status["Nav_Idx"] != next_status["Nav_Idx"]:
-                            exact_time = find_exact_transit_time(planet, current_date, next_date, status["Nav_Idx"], sys_flag)
+                            exact_time = find_exact_transit_time(body, current_date, next_date, status["Nav_Idx"], sys_flag)
                         
                         tags = []
                         if status["Vargottama"]: tags.append("🌟 Varg")
@@ -255,10 +296,11 @@ if st.button("Generate Timeline & Data", type="primary"):
                         if status["Combust"]: tags.append("🔥 Combust")
                         
                         all_transits.append({
-                            "Planet": planet,
+                            "Entry_Obj": entry_date, # Hidden sorting object
+                            "Body": body,
                             "Motion": status["Motion"],
-                            "D1 Sign": status["D1"],
-                            "D9 Navamsha": status["D9"],
+                            "Sign": status["D1"],
+                            "Sub-Division": status["D9"],
                             "Special Status": " | ".join(tags) if tags else "-",
                             "Entry Date": entry_date.strftime("%d %b %Y, %I:%M %p"),
                             "Exit Date": exact_time.strftime("%d %b %Y, %I:%M %p")
@@ -271,6 +313,10 @@ if st.button("Generate Timeline & Data", type="primary"):
             df = pd.DataFrame(all_transits)
             
             if not df.empty:
+                # Strictly sort the table chronologically using the datetime object
+                df = df.sort_values(by="Entry_Obj")
+                df = df.drop(columns=["Entry_Obj"]) # Remove the raw object column
+                
                 st.dataframe(
                     df, 
                     use_container_width=True,
@@ -281,4 +327,4 @@ if st.button("Generate Timeline & Data", type="primary"):
                     }
                 )
             else:
-                st.info("No major shifts found.")
+                st.info("No major shifts found in the specified timeframe.")
