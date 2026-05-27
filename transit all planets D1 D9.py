@@ -329,7 +329,7 @@ if "Vedic" in astrology_system:
     sys_flag |= swe.FLG_SIDEREAL
 
 # Main Page Header
-st.title("Pro Astrological Engine")
+st.title("Transit Pro Engine")
 
 col1, col2 = st.columns(2)
 with col1: selected_start = st.date_input("Start Date", datetime.date.today())
