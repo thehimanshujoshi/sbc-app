@@ -5,7 +5,7 @@ import yfinance as yf
 from scipy.signal import find_peaks
 from datetime import datetime, timedelta
 from dataclasses import dataclass
-from typing import Dict, List, Tuple, Any
+from typing import Dict, List, Tuple
 
 from skyfield.api import load
 from skyfield.framelib import ecliptic_frame
@@ -129,10 +129,10 @@ class ComponentCalculator:
 # ----------------------------
 # 2. Automated Extremes & Engine Orchestration
 # ----------------------------
-def fetch_and_find_extremes(symbol: str, start_date: str, distance: int) -> List[Tuple[str, float, str]]:
-    df = yf.download(symbol, start=start_date, progress=False)
+def fetch_and_find_extremes(symbol: str, start_date: str, end_date: str, distance: int) -> List[Tuple[str, float, str]]:
+    df = yf.download(symbol, start=start_date, end=end_date, progress=False)
     if df.empty:
-        raise ValueError(f"No data found for ticker {symbol}")
+        raise ValueError(f"No data found for ticker {symbol} in this date range.")
     
     prices = df['Close'].values.flatten()
     dates = df.index
@@ -181,7 +181,6 @@ def run_analysis(extremes: List[Tuple[str, float, str]]) -> pd.DataFrame:
 
     df = pd.DataFrame(results)
     
-    # Thresholding & Classification
     k_arr, w_arr, p_arr = df['K'].dropna().to_numpy(), df['W'].dropna().to_numpy(), df['P'].dropna().to_numpy()
     t = {
         'K_strong_neg': float(np.percentile(k_arr[k_arr < 0], 25)) if k_arr[k_arr < 0].size else 0,
@@ -218,62 +217,109 @@ def run_analysis(extremes: List[Tuple[str, float, str]]) -> pd.DataFrame:
     return df
 
 # ----------------------------
-# 3. Streamlit UI
+# 3. SELF-TESTING EVALUATOR
 # ----------------------------
-st.set_page_config(page_title="Automated Gann Analysis", layout="wide")
-st.title("🌌 Automated Gann Planetary Analysis")
-st.markdown("Enter a ticker symbol to fetch data, identify market extremes, and run orbital projections.")
+def evaluate_forecast(crit_df: pd.DataFrame, ticker: str, forecast_start: datetime):
+    # Fetch actual market data for the 360 days AFTER the anchor date
+    forecast_end = forecast_start + timedelta(days=390) # Add buffer for 14-day forward look
+    actual_data = yf.download(ticker, start=forecast_start, end=forecast_end, progress=False)
+    
+    if actual_data.empty:
+        crit_df['14-Day Result'] = "Data Unavailable"
+        return crit_df, 0, 0, 0
+    
+    actual_prices = actual_data['Close'].squeeze()
+    
+    results = []
+    hits = 0
+    evaluated = 0
+    
+    for _, row in crit_df.iterrows():
+        sig_date = pd.to_datetime(row['date'])
+        
+        # If the date hasn't happened yet in real life
+        if sig_date >= pd.to_datetime('today') - pd.Timedelta(days=14):
+            results.append("Pending...")
+            continue
+            
+        try:
+            # Find the closest trading day to the forecast date
+            idx = actual_prices.index.get_indexer([sig_date], method='nearest')[0]
+            
+            # Look 10 trading days (~14 calendar days) into the future
+            forward_idx = min(idx + 10, len(actual_prices) - 1)
+            
+            p_entry = float(actual_prices.iloc[idx])
+            p_exit = float(actual_prices.iloc[forward_idx])
+            percent_change = ((p_exit - p_entry) / p_entry) * 100
+            
+            signal_text = str(row['signal']).upper()
+            
+            if "BUY" in signal_text:
+                if percent_change > 0:
+                    results.append(f"✅ Hit (+{percent_change:.1f}%)")
+                    hits += 1
+                else:
+                    results.append(f"❌ Miss ({percent_change:.1f}%)")
+                evaluated += 1
+            elif "SELL" in signal_text:
+                if percent_change < 0:
+                    results.append(f"✅ Hit ({percent_change:.1f}%)")
+                    hits += 1
+                else:
+                    results.append(f"❌ Miss (+{percent_change:.1f}%)")
+                evaluated += 1
+            else:
+                results.append("N/A")
+                
+        except Exception:
+            results.append("Error")
+            
+    crit_df['14-Day Result'] = results
+    return crit_df, hits, evaluated
 
-st.sidebar.header("Asset Configuration")
+# ----------------------------
+# 4. Streamlit UI
+# ----------------------------
+st.set_page_config(page_title="Gann Backtester", layout="wide")
+st.title("🌌 Gann Planetary Algorithm: Self-Testing Engine")
+st.markdown("Set an anchor date in the past. The app will predict 360 days forward and immediately grade its own predictions against actual market data.")
+
+st.sidebar.header("1. Asset Configuration")
 ticker = st.sidebar.text_input("Yahoo Finance Ticker", value="^NSEI")
-st.sidebar.caption("Examples: ^NSEI (Nifty 50), CL=F (Crude), GC=F (Gold)")
-
-start_date = st.sidebar.date_input("Fetch History From", value=pd.to_datetime("2020-01-01"))
-
-# THE TIME MACHINE UPGRADE:
-end_date = st.sidebar.date_input("End Date (Use for Backtesting)", value=pd.to_datetime("today"))
-st.sidebar.caption("To backtest, set the End Date to a year ago and see if the forecast matched reality.")
-
+start_date = st.sidebar.date_input("Training Start Date", value=pd.to_datetime("2020-01-01"))
+anchor_date = st.sidebar.date_input("Anchor Date (Forecast Starts Here)", value=pd.to_datetime("2022-03-23"))
 peak_distance = st.sidebar.slider("Days between major extremes", min_value=10, max_value=100, value=30)
 
-# Updated to use the end_date
-def fetch_and_find_extremes_backtest(symbol: str, start: str, end: str, distance: int) -> List[Tuple[str, float, str]]:
-    df = yf.download(symbol, start=start, end=end, progress=False)
-    if df.empty:
-        raise ValueError(f"No data found for ticker {symbol}")
-    
-    prices = df['Close'].values.flatten()
-    dates = df.index
-    
-    tops_idx, _ = find_peaks(prices, distance=distance)
-    bottoms_idx, _ = find_peaks(-prices, distance=distance)
-    
-    extremes = [(dates[i].strftime('%Y-%m-%d'), float(prices[i]), 'top') for i in tops_idx] + \
-               [(dates[i].strftime('%Y-%m-%d'), float(prices[i]), 'bottom') for i in bottoms_idx]
-    
-    extremes.sort(key=lambda x: pd.to_datetime(x[0]))
-    return extremes
-
-if st.sidebar.button("Run Automated Analysis"):
-    with st.spinner(f"Fetching {ticker} data and calculating orbital mechanics..."):
+if st.sidebar.button("Run Backtest"):
+    with st.spinner(f"Training on data up to {anchor_date} and verifying future predictions..."):
         try:
-            extremes = fetch_and_find_extremes_backtest(ticker, start_date, end_date, peak_distance)
-            st.info(f"Automatically identified {len(extremes)} historical Tops/Bottoms between {start_date} and {end_date}.")
+            extremes = fetch_and_find_extremes(ticker, start_date, anchor_date, peak_distance)
             
             df_results = run_analysis(extremes)
             crit_df = df_results[df_results['critical_point'] == True].copy()
             
-            st.success("Analysis Complete!")
+            # Run the Self-Testing Evaluator
+            evaluated_df, hits, evaluated_count = evaluate_forecast(crit_df, ticker, pd.to_datetime(anchor_date))
             
-            col1, col2, col3 = st.columns(3)
-            col1.metric("Critical Events Detected", len(crit_df))
-            col2.metric("Potential BUY Signals", len(crit_df[crit_df['signal'].str.contains('BUY', na=False)]))
-            col3.metric("Potential SELL Signals", len(crit_df[crit_df['signal'].str.contains('SELL', na=False)]))
+            # Calculate Score
+            accuracy = (hits / evaluated_count * 100) if evaluated_count > 0 else 0
             
-            st.subheader(f"📅 Critical Forecast Dates for {ticker}")
-            display_df = crit_df[['lightning', 'days', 'date', 'signal', 'phase', 'K', 'W', 'P']]
+            st.success("Backtest Complete!")
+            
+            # Display Scorecard
+            st.subheader("🎯 Backtest Scorecard (14-Day Trade Window)")
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Signals Evaluated", evaluated_count)
+            c2.metric("Successful Hits", hits)
+            c3.metric("Failed Misses", evaluated_count - hits)
+            c4.metric("Accuracy Rate", f"{accuracy:.1f}%")
+            
+            # Display the Table
+            st.subheader(f"📅 Verified Forecast Log for {ticker}")
+            display_df = evaluated_df[['14-Day Result', 'lightning', 'date', 'signal', 'phase', 'K', 'W', 'P']]
             st.dataframe(display_df, use_container_width=True, hide_index=True)
             
         except Exception as e:
             st.error(f"Error: {e}")
-            st.write("Ensure the ticker symbol is correct and valid on Yahoo Finance.")
+            st.write("Ensure the ticker symbol is correct and the dates leave room for testing.")
