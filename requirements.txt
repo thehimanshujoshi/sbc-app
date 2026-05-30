@@ -11,3 +11,4 @@ yfinance
 scipy
 skyfield
 rich
+streamlit
