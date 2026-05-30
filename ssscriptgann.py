@@ -222,19 +222,43 @@ def run_analysis(extremes: List[Tuple[str, float, str]]) -> pd.DataFrame:
 # ----------------------------
 st.set_page_config(page_title="Automated Gann Analysis", layout="wide")
 st.title("🌌 Automated Gann Planetary Analysis")
-st.markdown("Enter a ticker symbol to automatically fetch data, identify market extremes, and run orbital projections.")
+st.markdown("Enter a ticker symbol to fetch data, identify market extremes, and run orbital projections.")
 
 st.sidebar.header("Asset Configuration")
 ticker = st.sidebar.text_input("Yahoo Finance Ticker", value="^NSEI")
-st.sidebar.caption("Examples: ^NSEI (Nifty 50), CL=F (Crude), GC=F (Gold), RELIANCE.NS")
+st.sidebar.caption("Examples: ^NSEI (Nifty 50), CL=F (Crude), GC=F (Gold)")
+
 start_date = st.sidebar.date_input("Fetch History From", value=pd.to_datetime("2020-01-01"))
+
+# THE TIME MACHINE UPGRADE:
+end_date = st.sidebar.date_input("End Date (Use for Backtesting)", value=pd.to_datetime("today"))
+st.sidebar.caption("To backtest, set the End Date to a year ago and see if the forecast matched reality.")
+
 peak_distance = st.sidebar.slider("Days between major extremes", min_value=10, max_value=100, value=30)
 
+# Updated to use the end_date
+def fetch_and_find_extremes_backtest(symbol: str, start: str, end: str, distance: int) -> List[Tuple[str, float, str]]:
+    df = yf.download(symbol, start=start, end=end, progress=False)
+    if df.empty:
+        raise ValueError(f"No data found for ticker {symbol}")
+    
+    prices = df['Close'].values.flatten()
+    dates = df.index
+    
+    tops_idx, _ = find_peaks(prices, distance=distance)
+    bottoms_idx, _ = find_peaks(-prices, distance=distance)
+    
+    extremes = [(dates[i].strftime('%Y-%m-%d'), float(prices[i]), 'top') for i in tops_idx] + \
+               [(dates[i].strftime('%Y-%m-%d'), float(prices[i]), 'bottom') for i in bottoms_idx]
+    
+    extremes.sort(key=lambda x: pd.to_datetime(x[0]))
+    return extremes
+
 if st.sidebar.button("Run Automated Analysis"):
-    with st.spinner(f"Fetching {ticker} data and calculating orbital mechanics (this may take a few seconds on first run)..."):
+    with st.spinner(f"Fetching {ticker} data and calculating orbital mechanics..."):
         try:
-            extremes = fetch_and_find_extremes(ticker, start_date, peak_distance)
-            st.info(f"Automatically identified {len(extremes)} historical Tops and Bottoms.")
+            extremes = fetch_and_find_extremes_backtest(ticker, start_date, end_date, peak_distance)
+            st.info(f"Automatically identified {len(extremes)} historical Tops/Bottoms between {start_date} and {end_date}.")
             
             df_results = run_analysis(extremes)
             crit_df = df_results[df_results['critical_point'] == True].copy()
