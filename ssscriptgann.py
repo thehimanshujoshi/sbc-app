@@ -39,19 +39,18 @@ def get_daily_astro_pull(date: pd.Timestamp, ts, earth, planets):
     return net_pull
 
 # ----------------------------
-# 2. Hybrid Market Math (Astro + TA)
+# 2. Hybrid Market Math & Real-World Window
 # ----------------------------
-def calculate_signals(df, ts, earth, planets, tp_pct, sl_pct):
+def calculate_signals(df, ts, earth, planets, tp_pct, sl_pct, holding_window, direction_pref):
     # 1. Astro Calculations
     astro_pulls = []
     for date in df.index:
         astro_pulls.append(get_daily_astro_pull(date, ts, earth, planets))
     df['Astro_Pull'] = astro_pulls
     
-    # 2. Technical Analysis (The Reality Check)
+    # 2. Technical Analysis
     df['SMA_50'] = df['Close'].rolling(window=50).mean()
     
-    # Calculate RSI manually
     delta = df['Close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
@@ -63,8 +62,8 @@ def calculate_signals(df, ts, earth, planets, tp_pct, sl_pct):
     df['Momentum_Z'] = (df['Price_Momentum'] - df['Price_Momentum'].rolling(20).mean()) / df['Price_Momentum'].rolling(20).std()
     df['Divergence'] = df['Momentum_Z'] - df['Astro_Z']
     
-    # 3. Hybrid Signal Generation (Astro + TA Confluence)
-    signals = []
+    # 3. Hybrid Signal Generation
+    raw_signals = []
     for i in range(len(df)):
         div = df['Divergence'].iloc[i]
         close = df['Close'].iloc[i]
@@ -72,65 +71,77 @@ def calculate_signals(df, ts, earth, planets, tp_pct, sl_pct):
         rsi = df['RSI'].iloc[i]
         
         if pd.isna(div) or pd.isna(sma):
-            signals.append("HOLD")
-        # BUY: Astro says buy AND we are above 50-day average (Uptrend) AND not overbought
+            raw_signals.append("HOLD")
         elif div < -1.5 and close > sma and rsi < 70:
-            signals.append("🟢 BUY")
-        # SELL: Astro says sell AND we are below 50-day average (Downtrend) AND not oversold
+            raw_signals.append("🟢 BUY")
         elif div > 1.5 and close < sma and rsi > 30:
-            signals.append("🔴 SELL")
+            raw_signals.append("🔴 SELL")
         else:
-            signals.append("HOLD")
+            raw_signals.append("HOLD")
             
-    df['Signal'] = signals
+    # Apply User's Direction Preference
+    final_signals = []
+    for sig in raw_signals:
+        if direction_pref == "Long Only" and sig == "🔴 SELL":
+            final_signals.append("HOLD")
+        elif direction_pref == "Short Only" and sig == "🟢 BUY":
+            final_signals.append("HOLD")
+        else:
+            final_signals.append(sig)
+            
+    df['Signal'] = final_signals
     
-    # 4. Strict Risk Management Backtesting (Simulating Intraday)
-    # We assume entry at the NEXT day's Open.
-    df['Next_Open'] = df['Open'].shift(-1)
-    df['Next_High'] = df['High'].shift(-1)
-    df['Next_Low'] = df['Low'].shift(-1)
-    
+    # 4. Strict N-Day Rolling Trade Logic
     results = []
     profits = []
     
     for i in range(len(df)):
         sig = df['Signal'].iloc[i]
         
-        if sig == "HOLD" or pd.isna(df['Next_Open'].iloc[i]):
+        # If HOLD or trade window extends beyond available current data
+        if sig == "HOLD" or (i + holding_window >= len(df)):
             results.append("-")
             profits.append(0.0)
             continue
             
-        entry_price = df['Next_Open'].iloc[i]
-        high = df['Next_High'].iloc[i]
-        low = df['Next_Low'].iloc[i]
+        entry_price = df['Open'].iloc[i+1]
+        window_high = df['High'].iloc[i+1 : i+1+holding_window].max()
+        window_low = df['Low'].iloc[i+1 : i+1+holding_window].min()
+        time_exit_price = df['Close'].iloc[i+holding_window]
         
         if sig == "🟢 BUY":
             target = entry_price * (1 + (tp_pct/100))
             stop = entry_price * (1 - (sl_pct/100))
-            # Did it hit target or stop first? (Approximation using daily ranges)
-            if low <= stop:
+            
+            if window_low <= stop and window_high >= target:
+                results.append("⚠️ MIXED (Assumed Stop)")
+                profits.append(-sl_pct)
+            elif window_low <= stop:
                 results.append("❌ STOPPED OUT")
                 profits.append(-sl_pct)
-            elif high >= target:
+            elif window_high >= target:
                 results.append("✅ TP HIT")
                 profits.append(tp_pct)
             else:
-                results.append("⏳ FLAT (Time Exit)")
-                profits.append(((df['Close'].shift(-1).iloc[i] - entry_price) / entry_price) * 100)
+                results.append(f"⏳ TIME EXIT ({holding_window}d)")
+                profits.append(((time_exit_price - entry_price) / entry_price) * 100)
                 
         elif sig == "🔴 SELL":
             target = entry_price * (1 - (tp_pct/100))
             stop = entry_price * (1 + (sl_pct/100))
-            if high >= stop:
+            
+            if window_high >= stop and window_low <= target:
+                results.append("⚠️ MIXED (Assumed Stop)")
+                profits.append(-sl_pct)
+            elif window_high >= stop:
                 results.append("❌ STOPPED OUT")
                 profits.append(-sl_pct)
-            elif low <= target:
+            elif window_low <= target:
                 results.append("✅ TP HIT")
                 profits.append(tp_pct)
             else:
-                results.append("⏳ FLAT (Time Exit)")
-                profits.append(((entry_price - df['Close'].shift(-1).iloc[i]) / entry_price) * 100)
+                results.append(f"⏳ TIME EXIT ({holding_window}d)")
+                profits.append(((entry_price - time_exit_price) / entry_price) * 100)
                 
     df['Outcome'] = results
     df['P&L_%'] = profits
@@ -139,84 +150,91 @@ def calculate_signals(df, ts, earth, planets, tp_pct, sl_pct):
 # ----------------------------
 # 3. Streamlit UI
 # ----------------------------
-st.set_page_config(page_title="Hybrid Quant-Astro Alg", layout="wide")
-st.title("📈 Hybrid Quant-Astro Algorithmic Trader")
-st.markdown("Combines planetary physics with strict Technical Analysis (Trend & RSI) and strict Risk Management.")
+st.set_page_config(page_title="Pro Signal Terminal", layout="wide")
+st.title("📟 Pro Trading Terminal: Astro-Quant System")
+st.markdown("Filter by market direction, set time limits, and simulate real-world execution.")
 
 ephemeris, ts, earth, planets = load_skyfield()
 
-st.sidebar.header("1. Asset & Time")
+# SIDEBAR CONFIGURATION
+st.sidebar.header("1. Data Feed")
 ticker = st.sidebar.text_input("Ticker Symbol", value="^NSEI")
-start_date = st.sidebar.date_input("Backtest Start Date", value=pd.to_datetime("2021-01-01"))
+start_date = st.sidebar.date_input("Start Date", value=pd.to_datetime("2022-01-01"))
 end_date = st.sidebar.date_input("End Date", value=pd.to_datetime("today"))
 
-st.sidebar.header("2. Risk Management (Crucial)")
-take_profit = st.sidebar.number_input("Take Profit Target (%)", value=1.0, step=0.1)
-stop_loss = st.sidebar.number_input("Stop Loss (%)", value=0.5, step=0.1)
+st.sidebar.header("2. Trade Desk Constraints")
+trade_direction = st.sidebar.radio("Direction Preference", ["Both (Long & Short)", "Long Only", "Short Only"])
+holding_window = st.sidebar.slider("Max Holding Window (Days)", min_value=1, max_value=15, value=3)
 
-if st.sidebar.button("Run Hybrid Algorithm"):
-    with st.spinner("Crunching historical market data and astrophysics..."):
+st.sidebar.header("3. Risk Limits")
+take_profit = st.sidebar.number_input("Take Profit Limit (%)", value=1.5, step=0.1)
+stop_loss = st.sidebar.number_input("Stop Loss Limit (%)", value=0.7, step=0.1)
+
+if st.sidebar.button("Execute System Engine"):
+    with st.spinner("Compiling signals and executing simulated trades..."):
         try:
-            df = yf.download(ticker, start=start_date, end=end_date + timedelta(days=1), progress=False)
+            df = yf.download(ticker, start=start_date, end=end_date + timedelta(days=15), progress=False)
             if df.empty:
-                st.error("No data found.")
+                st.error("No data found for this ticker/date range.")
                 st.stop()
                 
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = df.columns.get_level_values(0)
                 
-            analyzed_df = calculate_signals(df, ts, earth, planets, take_profit, stop_loss)
+            # Run Engine
+            analyzed_df = calculate_signals(df, ts, earth, planets, take_profit, stop_loss, holding_window, trade_direction)
             
             trades_df = analyzed_df[analyzed_df['Signal'].isin(["🟢 BUY", "🔴 SELL"])].copy()
             wins = len(trades_df[trades_df['Outcome'] == "✅ TP HIT"])
-            losses = len(trades_df[trades_df['Outcome'] == "❌ STOPPED OUT"])
-            flats = len(trades_df[trades_df['Outcome'] == "⏳ FLAT (Time Exit)"])
+            losses = len(trades_df[trades_df['Outcome'].str.contains("STOP")]) # Catches normal stops and mixed stops
+            flats = len(trades_df[trades_df['Outcome'].str.contains("TIME EXIT")])
             
             total_resolved = wins + losses + flats
             win_rate = (wins / total_resolved * 100) if total_resolved > 0 else 0
-            
             net_profit = trades_df['P&L_%'].sum()
             
             # --- LIVE EXECUTION PLAN ---
             st.markdown("---")
-            st.subheader("⚡ LIVE EXECUTION PLAN (TOMORROW)")
-            latest_day = analyzed_df.iloc[-1]
-            latest_date = analyzed_df.index[-1].strftime('%Y-%m-%d')
+            st.subheader("⚡ TOMORROW'S TRADE ORDER")
+            
+            # We look at the most recent available close to generate tomorrow's signal
+            latest_day = analyzed_df.iloc[-holding_window - 1] if len(analyzed_df) > holding_window else analyzed_df.iloc[-1]
+            latest_date = analyzed_df.index[-holding_window - 1].strftime('%Y-%m-%d') if len(analyzed_df) > holding_window else analyzed_df.index[-1].strftime('%Y-%m-%d')
+            
             current_signal = latest_day['Signal']
             last_close = latest_day['Close']
             
             if current_signal == "🟢 BUY":
-                st.success(f"**ACTION FOR {latest_date}:** 🟢 BUY ENTRY ALERTS TRIPPED")
-                st.write(f"- **Entry Rule:** Buy exactly at Tomorrow's Market Open.")
-                st.write(f"- **Take Profit Order (Limit):** Set to sell at {last_close * (1 + (take_profit/100)):.2f} (+{take_profit}%)")
-                st.write(f"- **Stop Loss Order (SL):** Set strict stop at {last_close * (1 - (stop_loss/100)):.2f} (-{stop_loss}%)")
-                st.write(f"- **Time Exit:** If neither is hit, close position manually at 3:15 PM.")
+                st.success(f"**ORDER GENERATED FOR TOMORROW OPEN:** 🟢 LONG POSITION")
+                st.write(f"1. **Execute:** Buy at Market Open.")
+                st.write(f"2. **Take Profit (Limit):** {last_close * (1 + (take_profit/100)):.2f} (+{take_profit}%)")
+                st.write(f"3. **Stop Loss (Limit):** {last_close * (1 - (stop_loss/100)):.2f} (-{stop_loss}%)")
+                st.write(f"4. **Time Constraint:** Close position automatically after {holding_window} trading days if targets are unmet.")
             elif current_signal == "🔴 SELL":
-                st.error(f"**ACTION FOR {latest_date}:** 🔴 SELL ENTRY ALERTS TRIPPED")
-                st.write(f"- **Entry Rule:** Short exactly at Tomorrow's Market Open.")
-                st.write(f"- **Take Profit Order (Limit):** Set to cover at {last_close * (1 - (take_profit/100)):.2f} (+{take_profit}%)")
-                st.write(f"- **Stop Loss Order (SL):** Set strict stop at {last_close * (1 + (stop_loss/100)):.2f} (-{stop_loss}%)")
-                st.write(f"- **Time Exit:** If neither is hit, close position manually at 3:15 PM.")
+                st.error(f"**ORDER GENERATED FOR TOMORROW OPEN:** 🔴 SHORT POSITION")
+                st.write(f"1. **Execute:** Sell Short at Market Open.")
+                st.write(f"2. **Take Profit (Limit):** {last_close * (1 - (take_profit/100)):.2f} (+{take_profit}%)")
+                st.write(f"3. **Stop Loss (Limit):** {last_close * (1 + (stop_loss/100)):.2f} (-{stop_loss}%)")
+                st.write(f"4. **Time Constraint:** Close position automatically after {holding_window} trading days if targets are unmet.")
             else:
-                st.warning(f"**ACTION FOR {latest_date}:** ⚖️ HOLD")
-                st.write("- **Analysis:** Trend and Astro-momentum are not aligned. Do not force a trade today. Preserve capital.")
+                st.warning(f"**ORDER GENERATED FOR TOMORROW OPEN:** ⚖️ FLAT (NO TRADE)")
+                st.write("- Market conditions or planetary physics do not meet execution criteria. Preserve capital.")
             st.markdown("---")
             
             # --- BACKTEST RESULTS ---
-            st.subheader(f"📊 Backtest Scorecard ({start_date.year} - {end_date.year})")
-            st.caption("Because we added strict trend filters, there will be FEWER trades, but they should be HIGHER quality.")
+            st.subheader(f"📊 Strategy Performance ({start_date.year} - Present)")
             c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Total Trades Taken", total_resolved)
+            c1.metric("Total Executed Trades", total_resolved)
             c2.metric("Target Hits (Wins)", wins)
-            c3.metric("Stopped Out (Losses)", losses)
+            c3.metric("Losses / Time Exits", losses + flats)
             
             if net_profit > 0:
-                c4.metric("Net Cumulative P&L", f"+{net_profit:.2f}%", "Profitable")
+                c4.metric("Net Cumulative Edge", f"+{net_profit:.2f}%", "Profitable")
             else:
-                c4.metric("Net Cumulative P&L", f"{net_profit:.2f}%", "-Loss")
+                c4.metric("Net Cumulative Edge", f"{net_profit:.2f}%", "-Loss")
             
             # --- TRADE LOG ---
-            st.subheader("📅 Detailed Trade Log")
+            st.subheader("📅 Backtest Trade Ledger")
             display_df = trades_df[['Close', 'Signal', 'Outcome', 'P&L_%']].copy()
             display_df.index = display_df.index.strftime('%Y-%m-%d')
             display_df['P&L_%'] = display_df['P&L_%'].round(2).astype(str) + "%"
