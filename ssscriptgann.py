@@ -2,324 +2,192 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import yfinance as yf
-from scipy.signal import find_peaks
 from datetime import datetime, timedelta
-from dataclasses import dataclass
-from typing import Dict, List, Tuple
+import math
 
 from skyfield.api import load
 from skyfield.framelib import ecliptic_frame
 
 # ----------------------------
-# 1. Configuration & Core Classes
+# 1. Astro Engine Setup
 # ----------------------------
 PLANETS = ['mercury', 'venus', 'mars', 'jupiter', 'saturn']
-ORBITAL_PERIODS = {'mercury': 88, 'venus': 225, 'mars': 687, 'jupiter': 4333, 'saturn': 10759}
-EARTH_AXIAL_TILT = 23.5
-HISTOGRAM_BINS = 12
-ANALYSIS_MAX_DAYS = 360
-ANALYSIS_STEP_DAYS = 7
 
-class SkyfieldPlanetaryDataProvider:
-    def __init__(self):
-        self.ephemeris = load('de421.bsp')
-        self.timescale = load.timescale()
-        self.earth = self.ephemeris['earth']
-        self.planets = {name: self.ephemeris[f"{name} barycenter"] for name in PLANETS}
-        self.orbital_periods = ORBITAL_PERIODS
+@st.cache_resource
+def load_skyfield():
+    """Cache the ephemeris so it doesn't reload on every button click"""
+    ephemeris = load('de421.bsp')
+    ts = load.timescale()
+    earth = ephemeris['earth']
+    planets = {name: ephemeris[f"{name} barycenter"] for name in PLANETS}
+    return ephemeris, ts, earth, planets
 
-    @staticmethod
-    def _norm_deg(x: float) -> float:
-        return float(x % 360.0)
-
-    def get_planetary_data(self, date: datetime) -> Dict[str, Dict[str, float]]:
-        t = self.timescale.utc(date.year, date.month, date.day)
-        t_next = self.timescale.utc((date + timedelta(days=1)).year, (date + timedelta(days=1)).month, (date + timedelta(days=1)).day)
-        data = {}
-        
-        for name, body in self.planets.items():
-            ast = self.earth.at(t).observe(body)
-            lon_deg, lat_deg, velocity = 0.0, 0.0, 0.0
+def get_daily_astro_pull(date: pd.Timestamp, ts, earth, planets):
+    """Calculates the net planetary directional pull for a specific day"""
+    t = ts.utc(date.year, date.month, date.day)
+    
+    net_pull = 0.0
+    for name, body in planets.items():
+        ast = earth.at(t).observe(body)
+        try:
+            lat, lon, _ = ast.frame_latlon(ecliptic_frame)
+            lon_rad = lon.radians
+            lat_rad = lat.radians
+            _, _, dist = ast.radec()
+            distance = max(dist.au, 0.1) # Prevent division by zero
             
-            try:
-                lat, lon, lat_rate, lon_rate = ast.frame_latlon_and_rates(ecliptic_frame)
-                lon_deg, lat_deg = float(lon.degrees), float(lat.degrees)
-                velocity = float(lon_rate.degrees_per_day) if hasattr(lon_rate, "degrees_per_day") else float(lon_rate)
-            except Exception:
-                try:
-                    lat, lon, _ = ast.frame_latlon(ecliptic_frame)
-                    lon_deg, lat_deg = float(lon.degrees), float(lat.degrees)
-                    ast_next = self.earth.at(t_next).observe(body)
-                    lat_n, lon_n, _ = ast_next.frame_latlon(ecliptic_frame)
-                    velocity = float((float(lon_n.degrees) - lon_deg + 540.0) % 360.0 - 180.0)
-                except Exception:
-                    pass
-
-            try:
-                _, dec, dist = ast.radec()
-                decl, distance = float(dec.degrees), float(dist.au)
-            except Exception:
-                decl, distance = lat_deg, 0.0
-
-            data[name] = {
-                'longitude': self._norm_deg(lon_deg), 'latitude': lat_deg,
-                'declination': decl, 'distance': distance, 'velocity': velocity,
-                'orbital_period': float(self.orbital_periods.get(name, 1.0))
-            }
-        return data
-
-@dataclass
-class MarketData:
-    dates: List[datetime]
-    prices: np.ndarray
-    ref_date: datetime
-    ref_price: float
-    times_from_start: np.ndarray
-    poly_coeffs: np.ndarray
-
-class ComponentCalculator:
-    def __init__(self, market: MarketData):
-        self.market = market
-
-    def calculate_k(self, target_date: datetime, planet_data: Dict[str, Dict[str, float]]) -> float:
-        T_market = float(np.mean(np.diff([d.toordinal() for d in self.market.dates]))) if len(self.market.dates) < 2 else 1.0
-        omega_market = 2.0 * np.pi / max(T_market, 1e-9)
-        days_elapsed = (target_date - self.market.dates[0]).days
-        sync_sum = 0.0
-        for data in planet_data.values():
-            omega_planet = 2.0 * np.pi / max(data.get('orbital_period', 1.0), 1.0)
-            theta_market = (omega_market * days_elapsed) % (2.0 * np.pi)
-            delta_theta = np.radians(data['longitude']) - theta_market
-            coupling = np.exp(-abs(omega_planet - omega_market) / max(omega_market, 1e-10))
-            contribution = coupling * np.sin(delta_theta)
-            if data.get('velocity', 0.0) < 0: contribution *= -1.0
-            sync_sum += contribution
-        return float(sync_sum)
-
-    def calculate_w(self, planet_data: Dict[str, Dict[str, float]]) -> float:
-        longitudes = [v['longitude'] for v in planet_data.values()]
-        declinations = [v['declination'] for v in planet_data.values()]
-        velocities = [v['velocity'] for v in planet_data.values()]
-        
-        hist, _ = np.histogram(longitudes, bins=HISTOGRAM_BINS, range=(0, 360))
-        probs_nz = (hist / max(len(longitudes), 1))[hist > 0]
-        H = -np.sum(probs_nz * np.log2(probs_nz + 1e-12)) if probs_nz.size > 0 else 0.0
-        H_max = np.log2(HISTOGRAM_BINS) if HISTOGRAM_BINS > 0 else 1.0
-        I = 1.0 - (H / H_max) if H_max > 0 else 0.0
-        
-        arr = [v * np.sin(np.radians(d)) for v, d in zip(velocities, declinations)]
-        grad_time = float(np.mean(arr)) if arr else 0.0
-        grad_space = float(np.std(declinations) / EARTH_AXIAL_TILT) if declinations else 0.0
-        return float(I * grad_time * (1.0 + grad_space))
-
-    def calculate_p(self, target_date: datetime, planet_data: Dict[str, Dict[str, float]]) -> float:
-        days_ahead = (target_date - self.market.ref_date).days
-        if days_ahead <= 0: return 0.0
-        
-        price_projection = float(np.polyval(self.market.poly_coeffs, self.market.times_from_start[-1] + days_ahead))
-        total_vec = np.zeros(3, dtype=float)
-        for p in planet_data.values():
-            lon, lat = np.radians(p['longitude']), np.radians(p['declination'])
-            weight = 1.0 / (max(p.get('distance', 1e-6), 1e-6) ** 2)
-            total_vec += weight * np.array([np.cos(lat) * np.cos(lon), np.cos(lat) * np.sin(lon), np.sin(lat)])
-        
-        attraction = float(np.linalg.norm(total_vec)) * (price_projection - float(self.market.ref_price)) / max((days_ahead ** 1.5), 1e-9)
-        return float(attraction)
-
-# ----------------------------
-# 2. Automated Extremes & Engine Orchestration
-# ----------------------------
-def fetch_and_find_extremes(symbol: str, start_date: str, end_date: str, distance: int) -> List[Tuple[str, float, str]]:
-    df = yf.download(symbol, start=start_date, end=end_date, progress=False)
-    if df.empty:
-        raise ValueError(f"No data found for ticker {symbol} in this date range.")
-    
-    prices = df['Close'].values.flatten()
-    dates = df.index
-    
-    tops_idx, _ = find_peaks(prices, distance=distance)
-    bottoms_idx, _ = find_peaks(-prices, distance=distance)
-    
-    extremes = [(dates[i].strftime('%Y-%m-%d'), float(prices[i]), 'top') for i in tops_idx] + \
-               [(dates[i].strftime('%Y-%m-%d'), float(prices[i]), 'bottom') for i in bottoms_idx]
-    
-    extremes.sort(key=lambda x: pd.to_datetime(x[0]))
-    return extremes
-
-def run_analysis(extremes: List[Tuple[str, float, str]]) -> pd.DataFrame:
-    if not extremes: raise ValueError("No extremes found. Try decreasing peak distance.")
-    
-    parsed = sorted([{'date': datetime.strptime(e[0], '%Y-%m-%d'), 'price': float(e[1])} for e in extremes], key=lambda x: x['date'])
-    dates = [p['date'] for p in parsed]
-    prices = np.array([p['price'] for p in parsed], dtype=float)
-    times = np.array([(d - dates[0]).days for d in dates], dtype=float)
-    poly = np.polyfit(times, prices, 2) if prices.size >= 3 else np.array([0.0, 0.0, float(prices[-1])])
-    
-    market = MarketData(dates, prices, dates[-1], float(prices[-1]), times, poly)
-    calc = ComponentCalculator(market)
-    provider = SkyfieldPlanetaryDataProvider()
-
-    results, prev = [], None
-    for days in range(0, ANALYSIS_MAX_DAYS + 1, ANALYSIS_STEP_DAYS):
-        target = market.ref_date + timedelta(days=days)
-        pdata = provider.get_planetary_data(target)
-        k, w, p = calc.calculate_k(target, pdata), calc.calculate_w(pdata), calc.calculate_p(target, pdata)
-        
-        row = {'days': days, 'date': target.strftime('%Y-%m-%d'), 'K': k, 'W': w, 'P': p}
-        if prev is not None:
-            row.update({
-                'K_change': (np.sign(k) != np.sign(prev['K'])) and (prev['K'] != 0),
-                'W_change': (np.sign(w) != np.sign(prev['W'])) and (prev['W'] != 0),
-                'P_change': (np.sign(p) != np.sign(prev['P'])) and (prev['P'] != 0)
-            })
-            row['critical_point'] = any([row['K_change'], row['W_change'], row['P_change']])
-        else:
-            row.update({'K_change': False, 'W_change': False, 'P_change': False, 'critical_point': False})
-        
-        results.append(row)
-        prev = {'K': k, 'W': w, 'P': p}
-
-    df = pd.DataFrame(results)
-    
-    k_arr, w_arr, p_arr = df['K'].dropna().to_numpy(), df['W'].dropna().to_numpy(), df['P'].dropna().to_numpy()
-    t = {
-        'K_strong_neg': float(np.percentile(k_arr[k_arr < 0], 25)) if k_arr[k_arr < 0].size else 0,
-        'K_weak_neg': float(np.percentile(k_arr[k_arr < 0], 75)) if k_arr[k_arr < 0].size else 0,
-        'K_weak_pos': float(np.percentile(k_arr[k_arr > 0], 25)) if k_arr[k_arr > 0].size else 0,
-        'K_strong_pos': float(np.percentile(k_arr[k_arr > 0], 75)) if k_arr[k_arr > 0].size else 0,
-        'P_threshold_pos': float(np.percentile(p_arr[p_arr > 0], 25)) if p_arr[p_arr > 0].size else 0,
-        'W_low': float(np.percentile(np.abs(w_arr), 25)) if w_arr.size else 0,
-    }
-
-    def get_signal(row):
-        k, w, p = row['K'], row['W'], row['P']
-        if k < t['K_strong_neg']: return "🚀 STRONG BUY"
-        if k < t['K_weak_neg']: return "🟢 BUY"
-        if k > t['K_strong_pos']: return "🔴 STRONG SELL"
-        if k > t['K_weak_pos']: return "⚠️ SELL"
-        if k > 0: return "🟡 LIGHT SELL"
-        if k < 0 and p > t['P_threshold_pos']: return "🔥 DUAL BUY"
-        if abs(k) < 0.1 and abs(w) < t['W_low']: return "⚖️ EQUILIBRIUM"
-        return "🔄 TRANSITION"
-
-    def get_phase(K, W, P):
-        if K < 0 and P > 0.5: return "🚀 Inverse Coherence - Bullish Impulse"
-        if K > 0 and abs(K) > 0.3 and P < 0: return "⚠️ Divergence - Possible Top"
-        if K > 0.5 and P < -0.3: return "📻 Harmonic Contraction - Confirmed Drop"
-        if abs(K) < 0.2 and abs(W) < 0.2 and abs(P) < 0.2: return "⚖️ Equilibrium - Sideways"
-        if P > 0 and K < 0.3: return "📈 Sustained Rise"
-        return "🔄 Transition"
-
-    df['signal'] = df.apply(get_signal, axis=1)
-    df['phase'] = df.apply(lambda r: get_phase(r['K'], r['W'], r['P']), axis=1)
-    df['lightning'] = df.apply(lambda r: "⚡" if (r['K'] < t['K_strong_neg'] or r['K'] > t['K_strong_pos'] or (r['K_change'] and abs(r['K']) > abs(t['K_weak_neg']) * 0.5) or (r['P_change'] and abs(r['P']) > 10.0)) else "", axis=1)
-    
-    return df
-
-# ----------------------------
-# 3. SELF-TESTING EVALUATOR
-# ----------------------------
-def evaluate_forecast(crit_df: pd.DataFrame, ticker: str, forecast_start: datetime):
-    # Fetch actual market data for the 360 days AFTER the anchor date
-    forecast_end = forecast_start + timedelta(days=390) # Add buffer for 14-day forward look
-    actual_data = yf.download(ticker, start=forecast_start, end=forecast_end, progress=False)
-    
-    if actual_data.empty:
-        crit_df['14-Day Result'] = "Data Unavailable"
-        return crit_df, 0, 0, 0
-    
-    actual_prices = actual_data['Close'].squeeze()
-    
-    results = []
-    hits = 0
-    evaluated = 0
-    
-    for _, row in crit_df.iterrows():
-        sig_date = pd.to_datetime(row['date'])
-        
-        # If the date hasn't happened yet in real life
-        if sig_date >= pd.to_datetime('today') - pd.Timedelta(days=14):
-            results.append("Pending...")
+            # Gravitational vector projected on the Y-axis (Up/Down)
+            # Weighted by inverse square of distance
+            pull = (math.sin(lon_rad) * math.cos(lat_rad)) / (distance ** 2)
+            net_pull += pull
+        except Exception:
             continue
             
+    return net_pull
+
+# ----------------------------
+# 2. Market Math & Backtesting
+# ----------------------------
+def calculate_signals(df, ts, earth, planets):
+    """Generates daily signals using Rolling Z-Scores of Astro Pull vs Price Momentum"""
+    
+    # 1. Calculate Daily Astro Pull
+    astro_pulls = []
+    progress_bar = st.progress(0)
+    st.write("Calculating planetary vectors for historical data...")
+    
+    total_days = len(df)
+    for i, date in enumerate(df.index):
+        pull = get_daily_astro_pull(date, ts, earth, planets)
+        astro_pulls.append(pull)
+        if i % 50 == 0:
+            progress_bar.progress(min(i / total_days, 1.0))
+            
+    progress_bar.progress(1.0)
+    df['Astro_Pull'] = astro_pulls
+    
+    # 2. Calculate Market Momentum (10-day slope)
+    df['Price_Momentum'] = df['Close'].diff(10)
+    
+    # 3. Create the Astro-Oscillator (Difference between normalized market and astro vectors)
+    # We use a 20-day rolling window to calculate dynamic Z-scores
+    df['Astro_Z'] = (df['Astro_Pull'] - df['Astro_Pull'].rolling(20).mean()) / df['Astro_Pull'].rolling(20).std()
+    df['Momentum_Z'] = (df['Price_Momentum'] - df['Price_Momentum'].rolling(20).mean()) / df['Price_Momentum'].rolling(20).std()
+    
+    df['Divergence'] = df['Momentum_Z'] - df['Astro_Z']
+    
+    # 4. Generate Signals (Trigger when divergence is extreme)
+    signals = []
+    for div in df['Divergence']:
+        if pd.isna(div):
+            signals.append("HOLD")
+        elif div > 1.5:  # Market is high, planets are low -> Reversal Down
+            signals.append("🔴 SELL")
+        elif div < -1.5: # Market is low, planets are high -> Reversal Up
+            signals.append("🟢 BUY")
+        else:
+            signals.append("HOLD")
+            
+    df['Signal'] = signals
+    
+    # 5. Evaluate Backtest (Look forward 2 trading days)
+    df['T+2_Close'] = df['Close'].shift(-2)
+    df['Trade_Return_%'] = ((df['T+2_Close'] - df['Close']) / df['Close']) * 100
+    
+    results = []
+    for i in range(len(df)):
+        sig = df['Signal'].iloc[i]
+        ret = df['Trade_Return_%'].iloc[i]
+        
+        if pd.isna(ret): # Last few days of the dataset won't have future data yet
+            results.append("Pending")
+        elif sig == "🟢 BUY":
+            results.append("✅ WIN" if ret > 0 else "❌ LOSS")
+        elif sig == "🔴 SELL":
+            results.append("✅ WIN" if ret < 0 else "❌ LOSS")
+        else:
+            results.append("-")
+            
+    df['Outcome'] = results
+    return df.dropna(subset=['Close'])
+
+# ----------------------------
+# 3. Streamlit UI
+# ----------------------------
+st.set_page_config(page_title="Daily Astro-Gann Signals", layout="wide")
+st.title("🌌 Daily Astro-Gann Signal Generator")
+st.markdown("Generates point-in-time daily trading signals for the next day, and backtests historical accuracy over a 2-day trading window.")
+
+# Load Skyfield (Cached)
+ephemeris, ts, earth, planets = load_skyfield()
+
+st.sidebar.header("Asset Configuration")
+ticker = st.sidebar.text_input("Ticker Symbol", value="^NSEI")
+start_date = st.sidebar.date_input("Backtest Start Date", value=pd.to_datetime("2023-01-01"))
+end_date = st.sidebar.date_input("End Date (Leave as today for LIVE signals)", value=pd.to_datetime("today"))
+
+if st.sidebar.button("Generate Signals & Backtest"):
+    with st.spinner(f"Fetching {ticker} and running daily planetary physics..."):
         try:
-            # Find the closest trading day to the forecast date
-            idx = actual_prices.index.get_indexer([sig_date], method='nearest')[0]
-            
-            # Look 10 trading days (~14 calendar days) into the future
-            forward_idx = min(idx + 10, len(actual_prices) - 1)
-            
-            p_entry = float(actual_prices.iloc[idx])
-            p_exit = float(actual_prices.iloc[forward_idx])
-            percent_change = ((p_exit - p_entry) / p_entry) * 100
-            
-            signal_text = str(row['signal']).upper()
-            
-            if "BUY" in signal_text:
-                if percent_change > 0:
-                    results.append(f"✅ Hit (+{percent_change:.1f}%)")
-                    hits += 1
-                else:
-                    results.append(f"❌ Miss ({percent_change:.1f}%)")
-                evaluated += 1
-            elif "SELL" in signal_text:
-                if percent_change < 0:
-                    results.append(f"✅ Hit ({percent_change:.1f}%)")
-                    hits += 1
-                else:
-                    results.append(f"❌ Miss (+{percent_change:.1f}%)")
-                evaluated += 1
-            else:
-                results.append("N/A")
+            # Fetch Data
+            df = yf.download(ticker, start=start_date, end=end_date + timedelta(days=1), progress=False)
+            if df.empty:
+                st.error("No data found. Check ticker or dates.")
+                st.stop()
                 
-        except Exception:
-            results.append("Error")
+            # Flatten multi-index if necessary (common in new yfinance versions)
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
+                
+            # Run calculations
+            analyzed_df = calculate_signals(df, ts, earth, planets)
             
-    crit_df['14-Day Result'] = results
-    return crit_df, hits, evaluated
-
-# ----------------------------
-# 4. Streamlit UI
-# ----------------------------
-st.set_page_config(page_title="Gann Backtester", layout="wide")
-st.title("🌌 Gann Planetary Algorithm: Self-Testing Engine")
-st.markdown("Set an anchor date in the past. The app will predict 360 days forward and immediately grade its own predictions against actual market data.")
-
-st.sidebar.header("1. Asset Configuration")
-ticker = st.sidebar.text_input("Yahoo Finance Ticker", value="^NSEI")
-start_date = st.sidebar.date_input("Training Start Date", value=pd.to_datetime("2020-01-01"))
-anchor_date = st.sidebar.date_input("Anchor Date (Forecast Starts Here)", value=pd.to_datetime("2022-03-23"))
-peak_distance = st.sidebar.slider("Days between major extremes", min_value=10, max_value=100, value=30)
-
-if st.sidebar.button("Run Backtest"):
-    with st.spinner(f"Training on data up to {anchor_date} and verifying future predictions..."):
-        try:
-            extremes = fetch_and_find_extremes(ticker, start_date, anchor_date, peak_distance)
+            # Extract action-only trades
+            trades_df = analyzed_df[analyzed_df['Signal'].isin(["🟢 BUY", "🔴 SELL"])].copy()
+            wins = len(trades_df[trades_df['Outcome'] == "✅ WIN"])
+            losses = len(trades_df[trades_df['Outcome'] == "❌ LOSS"])
+            total_resolved = wins + losses
+            win_rate = (wins / total_resolved * 100) if total_resolved > 0 else 0
             
-            df_results = run_analysis(extremes)
-            crit_df = df_results[df_results['critical_point'] == True].copy()
+            st.success("Computation Complete!")
             
-            # Run the Self-Testing Evaluator
-            evaluated_df, hits, evaluated_count = evaluate_forecast(crit_df, ticker, pd.to_datetime(anchor_date))
+            # --- LIVE SIGNAL SECTION ---
+            st.markdown("---")
+            st.subheader("⚡ LIVE SIGNAL FOR NEXT OPEN")
+            latest_day = analyzed_df.iloc[-1]
+            latest_date = analyzed_df.index[-1].strftime('%Y-%m-%d')
+            current_signal = latest_day['Signal']
             
-            # Calculate Score
-            accuracy = (hits / evaluated_count * 100) if evaluated_count > 0 else 0
+            if current_signal == "🟢 BUY":
+                st.info(f"**Date:** {latest_date} | **Action:** 🟢 BUY (Expect upward move over next 2 days)")
+            elif current_signal == "🔴 SELL":
+                st.error(f"**Date:** {latest_date} | **Action:** 🔴 SELL (Expect downward move over next 2 days)")
+            else:
+                st.warning(f"**Date:** {latest_date} | **Action:** ⚖️ HOLD (No planetary edge detected today)")
+            st.markdown("---")
             
-            st.success("Backtest Complete!")
-            
-            # Display Scorecard
-            st.subheader("🎯 Backtest Scorecard (14-Day Trade Window)")
+            # --- BACKTEST RESULTS ---
+            st.subheader("📊 Backtest Scorecard (T+2 Days Return)")
             c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Signals Evaluated", evaluated_count)
-            c2.metric("Successful Hits", hits)
-            c3.metric("Failed Misses", evaluated_count - hits)
-            c4.metric("Accuracy Rate", f"{accuracy:.1f}%")
+            c1.metric("Total Signals Generated", total_resolved)
+            c2.metric("Winning Trades", wins)
+            c3.metric("Losing Trades", losses)
             
-            # Display the Table
-            st.subheader(f"📅 Verified Forecast Log for {ticker}")
-            display_df = evaluated_df[['14-Day Result', 'lightning', 'date', 'signal', 'phase', 'K', 'W', 'P']]
-            st.dataframe(display_df, use_container_width=True, hide_index=True)
+            # Color code the win rate
+            if win_rate > 55:
+                c4.metric("Win Rate", f"{win_rate:.1f}%", "Profitable Edge")
+            else:
+                c4.metric("Win Rate", f"{win_rate:.1f}%", "-No Statistical Edge")
+            
+            # --- TRADE LOG ---
+            st.subheader("📅 Detailed Trade Log")
+            # Format dataframe for display
+            display_df = trades_df.copy()
+            display_df.index = display_df.index.strftime('%Y-%m-%d')
+            display_df = display_df[['Close', 'Signal', 'Trade_Return_%', 'Outcome']]
+            display_df['Trade_Return_%'] = display_df['Trade_Return_%'].round(2).astype(str) + "%"
+            
+            st.dataframe(display_df.sort_index(ascending=False), use_container_width=True)
             
         except Exception as e:
-            st.error(f"Error: {e}")
-            st.write("Ensure the ticker symbol is correct and the dates leave room for testing.")
+            st.error(f"An error occurred: {e}")
