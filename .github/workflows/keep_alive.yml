@@ -1,6 +1,6 @@
 name: Stealth Keep Alive
 
-on:
+#on:
   schedule:
     # Runs roughly every 6 hours
     - cron: '0 */6 * * *'
