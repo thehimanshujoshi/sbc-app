@@ -2,36 +2,57 @@ name: Stealth Keep Alive
 
 on:
   schedule:
-    # Runs roughly every 6 hours (we will randomize the exact minute below)
+    # Runs roughly every 6 hours
     - cron: '0 */6 * * *'
-  
-  workflow_dispatch: 
+  workflow_dispatch:
 
 jobs:
   stealth-ping:
     runs-on: ubuntu-latest
     steps:
-      - name: Randomize and Ping Webapps
-        run: |
-          # 1. Add ALL your Streamlit app URLs inside these parentheses.
-          # Wrap each URL in quotes, and put each on a new line.
-          URLS=(
-            "https://transitplanetsd9.streamlit.app/"
-            "https://sbc-app-4utjv53zu5qudm25dky6oz.streamlit.app/#energy-score-70"
-           # ""
-          )
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-          # 2. Loop through every URL in the list
-          for url in "${URLS[@]}"; do
-            
-            # Generate a random delay between 30 seconds and 5 minutes
-            # This ensures the server never sees requests at the exact same time
-            SLEEP_TIME=$((RANDOM % 300 + 30))
-            echo "Waiting ${SLEEP_TIME} seconds before visiting ${url}..."
-            sleep $SLEEP_TIME
-            
-            # 3. Ping the URL disguised as a normal Google Chrome browser
-            echo "Visiting ${url}..."
-            curl -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" -L -s -o /dev/null -w "HTTP Status: %{http_code}\n" "$url"
-            
-          done
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install Playwright
+        run: |
+          pip install playwright
+          playwright install chromium
+
+      - name: Ping Webapp via Browser
+        run: |
+          python -c "
+          from playwright.sync_api import sync_playwright
+          import time
+          import random
+
+          # Your Streamlit app URL is already added below
+          urls = [
+              'https://transitplanetsd9.streamlit.app/'
+          ]
+
+          with sync_playwright() as p:
+              # Launch a real Chromium browser in headless mode
+              browser = p.chromium.launch(headless=True)
+              page = browser.new_page()
+              
+              for url in urls:
+                  # Generate a random delay between 30 seconds and 5 minutes
+                  sleep_time = random.randint(30, 300)
+                  print(f'Waiting {sleep_time} seconds before visiting...')
+                  time.sleep(sleep_time)
+                  
+                  print(f'Visiting {url}...')
+                  try:
+                      # wait_until='networkidle' ensures the JS and WebSockets load
+                      page.goto(url, wait_until='networkidle')
+                      print(f'Successfully loaded and rendered {url}')
+                  except Exception as e:
+                      print(f'Failed to load {url}: {e}')
+                      
+              browser.close()
+          "
